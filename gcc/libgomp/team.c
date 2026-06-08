@@ -179,7 +179,6 @@ gomp_thread_start (_MCF_thread *thrd)
   return NULL;
 #endif
 }
-#endif
 
 static inline struct gomp_team *
 get_last_team (unsigned nthreads)
@@ -805,7 +804,9 @@ gomp_team_start (void (*fn) (void *), void *data, unsigned nthreads,
   /* Launch new threads.  */
   for (; i < nthreads; ++i)
     {
+#ifdef LIBGOMP_USE_PTHREADS
       int err;
+#endif
 
       start_data->ts.place_partition_off = thr->ts.place_partition_off;
       start_data->ts.place_partition_len = thr->ts.place_partition_len;
@@ -871,7 +872,9 @@ gomp_team_start (void (*fn) (void *), void *data, unsigned nthreads,
 	  start_data->place = p + 1;
 	  if (affinity_thr != NULL && pool->threads[i] != NULL)
 	    continue;
+#ifdef LIBGOMP_USE_PTHREADS
 	  gomp_init_thread_affinity (attr, p);
+#endif
 	}
 
       start_data->fn = fn;
