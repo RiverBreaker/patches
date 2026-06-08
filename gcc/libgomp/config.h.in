@@ -3,36 +3,6 @@
 /* Define to 1 if you have the `aligned_alloc' function. */
 #undef HAVE_ALIGNED_ALLOC
 
-/* Define to 1 if you have the <mcfgthread/atomic.h> header file. */
-#undef HAVE_MCFGTHREAD_ATOMIC_H
-
-/* Define to 1 if you have the <mcfgthread/clock.h> header file. */
-#undef HAVE_MCFGTHREAD_CLOCK_H
-
-/* Define to 1 if you have the <mcfgthread/cond.h> header file. */
-#undef HAVE_MCFGTHREAD_COND_H
-
-/* Define to 1 if you have the <mcfgthread/dtor_queue.h> header file. */
-#undef HAVE_MCFGTHREAD_DTOR_QUEUE_H
-
-/* Define to 1 if you have the <mcfgthread/fwd.h> header file. */
-#undef HAVE_MCFGTHREAD_FWD_H
-
-/* Define to 1 if you have the <mcfgthread/mutex.h> header file. */
-#undef HAVE_MCFGTHREAD_MUTEX_H
-
-/* Define to 1 if you have the <mcfgthread/once.h> header file. */
-#undef HAVE_MCFGTHREAD_ONCE_H
-
-/* Define to 1 if you have the <mcfgthread/sem.h> header file. */
-#undef HAVE_MCFGTHREAD_SEM_H
-
-/* Define to 1 if you have the <mcfgthread/thread.h> header file. */
-#undef HAVE_MCFGTHREAD_THREAD_H
-
-/* Define to 1 if you have the <mcfgthread/tls.h> header file. */
-#undef HAVE_MCFGTHREAD_TLS_H
-
 /* Define to 1 if the target assembler supports .symver directive. */
 #undef HAVE_AS_SYMVER_DIRECTIVE
 

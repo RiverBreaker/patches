@@ -1,4 +1,4 @@
-/* Copyright (C) 2005-2026 Free Software Foundation, Inc.
+/* Copyright (C) 2005-2023 Free Software Foundation, Inc.
    Contributed by Richard Henderson <rth@redhat.com>.
 
    This file is part of the GNU Offloading and Multi Processing Library
@@ -61,16 +61,14 @@
 
 #include "secure_getenv.h"
 #include "environ.h"
-#include "spincount.h"
 
-/* Default values of ICVs according to the OpenMP standard,
-   except for default-device-var.  */
+/* Default values of ICVs according to the OpenMP standard.  */
 const struct gomp_default_icv gomp_default_icv_values = {
   .nthreads_var = 1,
   .thread_limit_var = UINT_MAX,
   .run_sched_var = GFS_DYNAMIC,
   .run_sched_chunk_size = 1,
-  .default_device_var = INT_MIN,
+  .default_device_var = 0,
   .max_active_levels_var = 1,
   .bind_var = omp_proc_bind_false,
   .nteams_var = 0,
@@ -113,7 +111,6 @@ unsigned long gomp_bind_var_list_len;
 void **gomp_places_list;
 unsigned long gomp_places_list_len;
 uintptr_t gomp_def_allocator = omp_default_mem_alloc;
-char *gomp_def_allocator_envvar = NULL;
 int gomp_debug_var;
 unsigned int gomp_num_teams_var;
 int gomp_nteams_var;
@@ -923,7 +920,7 @@ parse_places_var (const char *name, bool ignore)
   return false;
 }
 
-/* Parse the OMP_STACKSIZE environment variable.  Return true if one was
+/* Parse the OMP_STACKSIZE environment varible.  Return true if one was
    present and it was successfully parsed.  */
 
 static bool
@@ -983,7 +980,7 @@ parse_stacksize (const char *env, const char *val, void *const params[])
   return false;
 }
 
-/* Parse the GOMP_SPINCOUNT environment variable.  Return true if one was
+/* Parse the GOMP_SPINCOUNT environment varible.  Return true if one was
    present and it was successfully parsed.  */
 
 static bool
@@ -1131,7 +1128,7 @@ parse_wait_policy (const char *env, const char *val, void *const params[])
   return false;
 }
 
-/* Parse the GOMP_CPU_AFFINITY environment variable.  Return true if one was
+/* Parse the GOMP_CPU_AFFINITY environment varible.  Return true if one was
    present and it was successfully parsed.  */
 
 static bool
@@ -1227,26 +1224,16 @@ parse_affinity (bool ignore)
   return true;
 
  invalid:
-  gomp_error ("Invalid value for environment variable GOMP_CPU_AFFINITY");
+  gomp_error ("Invalid value for enviroment variable GOMP_CPU_AFFINITY");
   return false;
 }
-
-/* These are reminders to add new allocators to parse_allocator.  */
-_Static_assert (GOMP_OMP_PREDEF_ALLOC_MAX == omp_thread_mem_alloc);
-_Static_assert (GOMP_OMPX_PREDEF_ALLOC_MAX == ompx_gnu_managed_mem_alloc);
-_Static_assert (GOMP_OMP_PREDEF_MEMSPACE_MAX == omp_low_lat_mem_space);
-_Static_assert (GOMP_OMPX_PREDEF_MEMSPACE_MAX == ompx_gnu_managed_mem_space);
 
 /* Parse the OMP_ALLOCATOR environment variable and return the value.  */
 static bool
 parse_allocator (const char *env, const char *val, void *const params[])
 {
-  const char *orig_val = val;
   uintptr_t *ret = (uintptr_t *) params[0];
   *ret = omp_default_mem_alloc;
-  bool memspace = false;
-  size_t ntraits = 0;
-  omp_alloctrait_t *traits;
 
   if (val == NULL)
     return false;
@@ -1255,172 +1242,28 @@ parse_allocator (const char *env, const char *val, void *const params[])
     ++val;
   if (0)
     ;
-#define C(v, is_memspace) \
+#define C(v) \
   else if (strncasecmp (val, #v, sizeof (#v) - 1) == 0)	\
     {							\
       *ret = v;						\
       val += sizeof (#v) - 1;				\
-      memspace = is_memspace;					\
     }
-  C (omp_default_mem_alloc, false)
-  C (omp_large_cap_mem_alloc, false)
-  C (omp_const_mem_alloc, false)
-  C (omp_high_bw_mem_alloc, false)
-  C (omp_low_lat_mem_alloc, false)
-  C (omp_cgroup_mem_alloc, false)
-  C (omp_pteam_mem_alloc, false)
-  C (omp_thread_mem_alloc, false)
-  C (ompx_gnu_pinned_mem_alloc, false)
-  C (ompx_gnu_managed_mem_alloc, false)
-  C (omp_default_mem_space, true)
-  C (omp_large_cap_mem_space, true)
-  C (omp_const_mem_space, true)
-  C (omp_high_bw_mem_space, true)
-  C (omp_low_lat_mem_space, true)
-  C (ompx_gnu_managed_mem_space, true)
+  C (omp_default_mem_alloc)
+  C (omp_large_cap_mem_alloc)
+  C (omp_const_mem_alloc)
+  C (omp_high_bw_mem_alloc)
+  C (omp_low_lat_mem_alloc)
+  C (omp_cgroup_mem_alloc)
+  C (omp_pteam_mem_alloc)
+  C (omp_thread_mem_alloc)
 #undef C
   else
-    goto invalid;
-  if (memspace && *val == ':')
-    {
-      ++val;
-      const char *cp = val;
-      while (*cp != '\0')
-	{
-	  if (*cp == '=')
-	    ++ntraits;
-	  ++cp;
-	}
-      traits = gomp_alloca (ntraits * sizeof (omp_alloctrait_t));
-      size_t n = 0;
-      while (*val != '\0')
-	{
-#define C(v) \
-	  else if (strncasecmp (val, #v "=", sizeof (#v)) == 0)	\
-	    {							\
-	      val += sizeof (#v);				\
-	      traits[n].key = omp_atk_ ## v;
-#define V(v) \
-	    else if (strncasecmp (val, #v, sizeof (#v) - 1) == 0)	\
-	      {								\
-		val += sizeof (#v) - 1;					\
-		traits[n].value = omp_atv_ ## v;			\
-	      }
-	  if (0)
-	    ;
-	  C (sync_hint)
-	      if (0)
-		;
-	      V (contended)
-	      V (uncontended)
-	      V (serialized)
-	      V (private)
-	      else
-		goto invalid;
-	    }
-	  C (alignment)
-	      char *end;
-	      errno = 0;
-	      traits[n].value = strtol (val, &end, 10);
-	      if (errno || end == val || traits[n].value <= 0)
-		goto invalid;
-	      val = end;
-	    }
-	  C (access)
-	      if (0)
-		;
-	      V (all)
-	      V (cgroup)
-	      V (pteam)
-	      V (thread)
-	      else
-		goto invalid;
-	    }
-	  C (pool_size)
-	      char *end;
-	      errno = 0;
-	      traits[n].value = strtol (val, &end, 10);
-	      if (errno || end == val || traits[n].value <= 0)
-		goto invalid;
-	      val = end;
-	    }
-	  C (fallback)
-	      if (0)
-		;
-	      V (default_mem_fb)
-	      V (null_fb)
-	      V (abort_fb)
-	      V (allocator_fb)
-	      else
-		goto invalid;
-	    }
-	  /* Ignore fb_data, which expects an allocator handle.  */
-	  C (pinned)
-	      if (0)
-		;
-	      V (true)
-	      V (false)
-	      else
-		goto invalid;
-	    }
-	  C (partition)
-	      if (0)
-		;
-	      V (environment)
-	      V (nearest)
-	      V (blocked)
-	      V (interleaved)
-	      else
-		goto invalid;
-	    }
-	  else
-	    goto invalid;
-	  if (*val != ',')
-	    break;
-	  ++val;
-	  ++n;
-	  if (*val == '\0')
-	    goto invalid;
-	}
-#undef C
-#undef V
-    }
-  else if (memspace)
-    switch (*ret)
-      {
-	case omp_default_mem_space: *ret = omp_default_mem_alloc; break;
-	case omp_large_cap_mem_space: *ret = omp_large_cap_mem_alloc; break;
-	case omp_const_mem_space: *ret = omp_const_mem_alloc; break;
-	case omp_high_bw_mem_space: *ret = omp_high_bw_mem_alloc; break;
-	case omp_low_lat_mem_space: *ret = omp_low_lat_mem_alloc; break;
-	default: __builtin_unreachable ();
-      }
+    val = "X";
   while (isspace ((unsigned char) *val))
     ++val;
   if (*val == '\0')
-    {
-      if (ntraits)
-	{
-	  *ret = omp_init_allocator (*ret, ntraits, traits);
-	  if (*ret == omp_null_allocator)
-	    {
-	      gomp_error ("Allocator of environment variable %.*s cannot be "
-			  "created, using omp_default_mem_alloc instead",
-			  (int) (orig_val - env - 1), env);
-	      *ret = omp_default_mem_alloc;
-	    }
-	  else
-	    gomp_def_allocator_envvar = strdup (orig_val);
-	}
-      return true;
-    }
-invalid:
-  int len = (orig_val - env - 1);
-  if (*val == '\0')
-    gomp_error ("Missing value at the end of environment variable %s", env);
-  else
-    gomp_error ("Invalid value for environment variable %.*s when parsing: %s",
-		len, env, val);
+    return true;
+  print_env_var_error (env, val);
   *ret = omp_default_mem_alloc;
   return false;
 }
@@ -1771,13 +1614,9 @@ omp_display_env (int verbose)
   struct gomp_icv_list *none
     = gomp_get_initial_icv_item (GOMP_DEVICE_NUM_FOR_NO_SUFFIX);
 
-  if (none->icvs.default_device_var == INT_MIN)
-    /* This implies OMP_TARGET_OFFLOAD=mandatory.  */
-    gomp_init_targets_once ();
-
   fputs ("\nOPENMP DISPLAY ENVIRONMENT BEGIN\n", stderr);
 
-  fputs ("  _OPENMP = '202111'\n", stderr);
+  fputs ("  _OPENMP = '201511'\n", stderr);
 
   fprintf (stderr, "  [host] OMP_DYNAMIC = '%s'\n",
 	   none->icvs.dyn_var ? "TRUE" : "FALSE");
@@ -1940,11 +1779,7 @@ omp_display_env (int verbose)
     C (omp_pteam_mem_alloc)
     C (omp_thread_mem_alloc)
 #undef C
-    /* For an OMP_ALLOCATOR with traits, '' will be output.  */
-    default:
-      if (gomp_def_allocator_envvar)
-	fputs (gomp_def_allocator_envvar, stderr);
-      break;
+    default: break;
     }
   fputs ("'\n", stderr);
 
@@ -2196,16 +2031,6 @@ startswith (const char *str, const char *prefix)
   return strncmp (str, prefix, strlen (prefix)) == 0;
 }
 
-static void __attribute__((destructor))
-cleanup_env (void)
-{
-  if (gomp_def_allocator_envvar != NULL)
-    {
-      free (gomp_def_allocator_envvar);
-      omp_destroy_allocator (gomp_def_allocator);
-    }
-}
-
 static void __attribute__((constructor))
 initialize_env (void)
 {
@@ -2234,139 +2059,138 @@ initialize_env (void)
   none = gomp_get_initial_icv_item (GOMP_DEVICE_NUM_FOR_NO_SUFFIX);
   initialize_icvs (&none->icvs);
 
-  if (environ)
-    for (env = environ; *env != 0; env++)
-      {
-	if (!startswith (*env, "OMP_"))
-	  continue;
-
-       /* Name of the environment variable without suffix "OMP_".  */
-       char *name = *env + sizeof ("OMP_") - 1;
-       for (omp_var = 0; omp_var < OMP_VAR_CNT; omp_var++)
-	  {
-	    if (startswith (name, envvars[omp_var].name))
-	      {
-		pos = envvars[omp_var].name_len;
-		if (name[pos] == '=')
-		  {
-		    pos++;
-		    flag_var_addr
-		      = add_initial_icv_to_list (GOMP_DEVICE_NUM_FOR_NO_SUFFIX,
-						 envvars[omp_var].flag_vars[0],
-						 params);
-		  }
-		else if (startswith (&name[pos], "_DEV=")
-			 && envvars[omp_var].flag & GOMP_ENV_SUFFIX_DEV)
-		  {
-		    pos += 5;
-		    flag_var_addr
-		      = add_initial_icv_to_list (GOMP_DEVICE_NUM_FOR_DEV,
-						 envvars[omp_var].flag_vars[0],
-						 params);
-		  }
-		else if (startswith (&name[pos], "_ALL=")
-			 && envvars[omp_var].flag & GOMP_ENV_SUFFIX_ALL)
-		  {
-		    pos += 5;
-		    flag_var_addr
-		      = add_initial_icv_to_list (GOMP_DEVICE_NUM_FOR_ALL,
-						 envvars[omp_var].flag_vars[0],
-						 params);
-		  }
-		else if (startswith (&name[pos], "_DEV_")
-			 && envvars[omp_var].flag & GOMP_ENV_SUFFIX_DEV_X)
-		  {
-		    pos += 5;
-		    if (!get_device_num (*env, &name[pos], &dev_num,
-					 &dev_num_len))
-		      break;
-
-		    pos += dev_num_len + 1;
-		    flag_var_addr
-		      = add_initial_icv_to_list (dev_num,
-						 envvars[omp_var].flag_vars[0],
-						 params);
-		  }
-		else
-		  {
-		    gomp_error ("Invalid environment variable in %s", *env);
-		    break;
-		  }
-		env_val = &name[pos];
-
-		if (envvars[omp_var].parse_func (*env, env_val, params))
-		  {
-		    for (i = 0; i < 3; ++i)
-		      if (envvars[omp_var].flag_vars[i])
-			gomp_set_icv_flag (flag_var_addr,
-					   envvars[omp_var].flag_vars[i]);
-		      else
-			break;
-		  }
-
-		break;
-	      }
-	  }
-      }
-
-  all = gomp_get_initial_icv_item (GOMP_DEVICE_NUM_FOR_ALL);
-  for (omp_var = 0; omp_var < OMP_HOST_VAR_CNT; omp_var++)
+  for (env = environ; *env != 0; env++)
     {
-      if (none != NULL
-	  && gomp_get_icv_flag (none->flags, host_envvars[omp_var].flag_var))
-	get_icv_member_addr (&none->icvs,
-			     host_envvars[omp_var].flag_var, params);
-      else if (all != NULL
-	       && gomp_get_icv_flag (all->flags,
-				     host_envvars[omp_var].flag_var))
-	get_icv_member_addr (&all->icvs, host_envvars[omp_var].flag_var,
-			     params);
-      else
+      if (!startswith (*env, "OMP_"))
 	continue;
 
-      switch (host_envvars[omp_var].type_code)
+     /* Name of the environment variable without suffix "OMP_".  */
+     char *name = *env + sizeof ("OMP_") - 1;
+     for (omp_var = 0; omp_var < OMP_VAR_CNT; omp_var++)
 	{
-	case PARSE_INT:
-	  for (i = 0; i < 3; ++i)
-	    if (host_envvars[omp_var].dest[i] != NULL && params[i] != NULL)
-	      *(int *) (host_envvars[omp_var].dest[i]) = *(int *) params[i];
-	  break;
-	case PARSE_BOOL:
-	  for (i = 0; i < 3; ++i)
-	    if (host_envvars[omp_var].dest[i] != NULL && params[i] != NULL)
-	      *(bool *) (host_envvars[omp_var].dest[i]) = *(bool *) params[i];
-	  break;
-	case PARSE_UINT:
-	  for (i = 0; i < 3; ++i)
-	    if (host_envvars[omp_var].dest[i] != NULL && params[i] != NULL)
-	      *(unsigned int *) (host_envvars[omp_var].dest[i])
-		= *(unsigned int *) params[i];
-	  break;
-	case PARSE_ULONG:
-	  for (i = 0; i < 3; ++i)
-	    if (host_envvars[omp_var].dest[i] != NULL && params[i] != NULL)
-	      *(unsigned long *) (host_envvars[omp_var].dest[i])
-		= *(unsigned long *) params[i];
-	  break;
-	case PARSE_UCHAR:
-	  for (i = 0; i < 3; ++i)
-	    if (host_envvars[omp_var].dest[i] != NULL && params[i] != NULL)
-	      *(unsigned char *) (host_envvars[omp_var].dest[i])
-		= *(unsigned char *) params[i];
-	  break;
-	case PARSE_SCHEDULE:
-	  *(enum gomp_schedule_type *) (host_envvars[omp_var].dest[0])
-	    = *(enum gomp_schedule_type *) params[0];
-	  *(int *) (host_envvars[omp_var].dest[1]) = *(int *) params[1];
-	  break;
-	case PARSE_BIND:
-	  *(char *) (host_envvars[omp_var].dest[0]) = *(char *) params[0];
-	  *(char **) (host_envvars[omp_var].dest[1]) = *(char **) params[1];
-	  *(unsigned long *) (host_envvars[omp_var].dest[2])
-	    = *(unsigned long *) params[2];
-	  break;
+	  if (startswith (name, envvars[omp_var].name))
+	    {
+	      pos = envvars[omp_var].name_len;
+	      if (name[pos] == '=')
+		{
+		  pos++;
+		  flag_var_addr
+		    = add_initial_icv_to_list (GOMP_DEVICE_NUM_FOR_NO_SUFFIX,
+					       envvars[omp_var].flag_vars[0],
+					       params);
+		}
+	      else if (startswith (&name[pos], "_DEV=")
+		       && envvars[omp_var].flag & GOMP_ENV_SUFFIX_DEV)
+		{
+		  pos += 5;
+		  flag_var_addr
+		    = add_initial_icv_to_list (GOMP_DEVICE_NUM_FOR_DEV,
+					       envvars[omp_var].flag_vars[0],
+					       params);
+		}
+	      else if (startswith (&name[pos], "_ALL=")
+		       && envvars[omp_var].flag & GOMP_ENV_SUFFIX_ALL)
+		{
+		  pos += 5;
+		  flag_var_addr
+		    = add_initial_icv_to_list (GOMP_DEVICE_NUM_FOR_ALL,
+					       envvars[omp_var].flag_vars[0],
+					       params);
+		}
+	      else if (startswith (&name[pos], "_DEV_")
+		       && envvars[omp_var].flag & GOMP_ENV_SUFFIX_DEV_X)
+		{
+		  pos += 5;
+		  if (!get_device_num (*env, &name[pos], &dev_num,
+				       &dev_num_len))
+		    break;
+
+		  pos += dev_num_len + 1;
+		  flag_var_addr
+		    = add_initial_icv_to_list (dev_num,
+					       envvars[omp_var].flag_vars[0],
+					       params);
+		}
+	      else
+		{
+		  gomp_error ("Invalid environment variable in %s", *env);
+		  break;
+		}
+	      env_val = &name[pos];
+
+	      if (envvars[omp_var].parse_func (*env, env_val, params))
+		{
+		  for (i = 0; i < 3; ++i)
+		    if (envvars[omp_var].flag_vars[i])
+		      gomp_set_icv_flag (flag_var_addr,
+					 envvars[omp_var].flag_vars[i]);
+		    else
+		      break;
+		}
+
+	      break;
+	    }
 	}
     }
+
+    all = gomp_get_initial_icv_item (GOMP_DEVICE_NUM_FOR_ALL);
+    for (omp_var = 0; omp_var < OMP_HOST_VAR_CNT; omp_var++)
+      {
+	if (none != NULL
+	    && gomp_get_icv_flag (none->flags, host_envvars[omp_var].flag_var))
+	  get_icv_member_addr (&none->icvs,
+			       host_envvars[omp_var].flag_var, params);
+	else if (all != NULL
+		 && gomp_get_icv_flag (all->flags,
+				       host_envvars[omp_var].flag_var))
+	  get_icv_member_addr (&all->icvs, host_envvars[omp_var].flag_var,
+			       params);
+	else
+	  continue;
+
+	switch (host_envvars[omp_var].type_code)
+	  {
+	  case PARSE_INT:
+	    for (i = 0; i < 3; ++i)
+	      if (host_envvars[omp_var].dest[i] != NULL && params[i] != NULL)
+		*(int *) (host_envvars[omp_var].dest[i]) = *(int *) params[i];
+	    break;
+	  case PARSE_BOOL:
+	    for (i = 0; i < 3; ++i)
+	      if (host_envvars[omp_var].dest[i] != NULL && params[i] != NULL)
+		*(bool *) (host_envvars[omp_var].dest[i]) = *(bool *) params[i];
+	    break;
+	  case PARSE_UINT:
+	    for (i = 0; i < 3; ++i)
+	      if (host_envvars[omp_var].dest[i] != NULL && params[i] != NULL)
+		*(unsigned int *) (host_envvars[omp_var].dest[i])
+		  = *(unsigned int *) params[i];
+	    break;
+	  case PARSE_ULONG:
+	    for (i = 0; i < 3; ++i)
+	      if (host_envvars[omp_var].dest[i] != NULL && params[i] != NULL)
+		*(unsigned long *) (host_envvars[omp_var].dest[i])
+		  = *(unsigned long *) params[i];
+	    break;
+	  case PARSE_UCHAR:
+	    for (i = 0; i < 3; ++i)
+	      if (host_envvars[omp_var].dest[i] != NULL && params[i] != NULL)
+		*(unsigned char *) (host_envvars[omp_var].dest[i])
+		  = *(unsigned char *) params[i];
+	    break;
+	  case PARSE_SCHEDULE:
+	    *(enum gomp_schedule_type *) (host_envvars[omp_var].dest[0])
+	      = *(enum gomp_schedule_type *) params[0];
+	    *(int *) (host_envvars[omp_var].dest[1]) = *(int *) params[1];
+	    break;
+	  case PARSE_BIND:
+	    *(char *) (host_envvars[omp_var].dest[0]) = *(char *) params[0];
+	    *(char **) (host_envvars[omp_var].dest[1]) = *(char **) params[1];
+	    *(unsigned long *) (host_envvars[omp_var].dest[2])
+	      = *(unsigned long *) params[2];
+	    break;
+	  }
+      }
 
   if (((none != NULL && gomp_get_icv_flag (none->flags, GOMP_ICV_BIND))
        || (all != NULL && gomp_get_icv_flag (all->flags, GOMP_ICV_BIND)))
@@ -2388,10 +2212,6 @@ initialize_env (void)
       else if (gomp_nthreads_var_list_len > 1 || gomp_bind_var_list_len > 1)
 	gomp_global_icv.max_active_levels_var = gomp_supported_active_levels;
     }
-
-  if (gomp_global_icv.default_device_var == INT_MIN
-      && gomp_target_offload_var != GOMP_TARGET_OFFLOAD_MANDATORY)
-    none->icvs.default_device_var = gomp_global_icv.default_device_var = 0;
 
   /* Process GOMP_* variables and dependencies between parsed ICVs.  */
   parse_int_secure ("GOMP_DEBUG", &gomp_debug_var, true);
@@ -2434,17 +2254,14 @@ initialize_env (void)
     {
       /* Using a rough estimation of 100000 spins per msec,
 	 use 5 min blocking for OMP_WAIT_POLICY=active,
-	 3 msec blocking when OMP_WAIT_POLICY is not specified
+	 3 msec blocking when OMP_WAIT_POLICY is not specificed
 	 and 0 when OMP_WAIT_POLICY=passive.
 	 Depending on the CPU speed, this can be e.g. 5 times longer
 	 or 5 times shorter.  */
       if (wait_policy > 0)
 	gomp_spin_count_var = 30000000000LL;
       else if (wait_policy < 0)
-	{
-	  gomp_spin_count_var = 300000LL;
-	  do_adjust_default_spincount ();
-	}
+	gomp_spin_count_var = 300000LL;
     }
   /* gomp_throttled_spin_count_var is used when there are more libgomp
      managed threads than available CPUs.  Use very short spinning.  */
@@ -2465,7 +2282,7 @@ initialize_env (void)
       const char *env = getenv ("GOMP_STACKSIZE");
       if (env != NULL
 	  && parse_stacksize ("GOMP_STACKSIZE", env,
-			      (void *[]) {&none->icvs.stacksize}))
+			      (void *[3]) {&none->icvs.stacksize}))
 	gomp_set_icv_flag (&none->flags, GOMP_ICV_STACKSIZE);
     }
   if (none != NULL && gomp_get_icv_flag (none->flags, GOMP_ICV_STACKSIZE))
@@ -2475,7 +2292,7 @@ initialize_env (void)
 
   if ((none != NULL && gomp_get_icv_flag (none->flags, GOMP_ICV_STACKSIZE))
       || (all != NULL && gomp_get_icv_flag (all->flags, GOMP_ICV_STACKSIZE))
-      || GOMP_DEFAULT_STACKSIZE != 0)
+      || GOMP_DEFAULT_STACKSIZE)
     {
       int err;
 
@@ -2518,19 +2335,4 @@ initialize_env (void)
 
   goacc_profiling_initialize ();
 }
-
-
-/* Stub implementation; to be moved to ompt.cc once implemented.  */
-
-ialias (omp_control_tool)
-
-omp_control_tool_result_t
-omp_control_tool (omp_control_tool_t command, int modifier, void *arg)
-{
-  (void) command;
-  (void) modifier;
-  (void) arg;
-  return omp_control_tool_notool;
-}
-
 #endif /* LIBGOMP_OFFLOADED_ONLY */

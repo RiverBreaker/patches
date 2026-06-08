@@ -17,11 +17,11 @@ AC_MSG_RESULT($enable_version_specific_runtime_libs)
 # We would like our source tree to be readonly. However when releases or
 # pre-releases are generated, the flex/bison generated files as well as the
 # various formats of manuals need to be included along with the rest of the
-# sources.  Therefore we have --enable-generated-files-in-srcdir to do
+# sources.  Therefore we have --enable-generated-files-in-srcdir to do 
 # just that.
 AC_MSG_CHECKING([for --enable-generated-files-in-srcdir])
 LIBGOMP_ENABLE(generated-files-in-srcdir, no, ,
-   [put copies of generated files in source dir intended for creating source
+   [put copies of generated files in source dir intended for creating source 
     tarballs for users without texinfo bison or flex.],
    permit yes|no)
 AC_MSG_RESULT($enable_generated_files_in_srcdir)
@@ -148,6 +148,7 @@ AS_IF([test "x$enable_werror" != "xno" && test "x$GCC" = "xyes"],
 # Find other programs we need.
 AC_CHECK_TOOL(AR, ar)
 AC_CHECK_TOOL(RANLIB, ranlib, ranlib-not-found-in-path-error)
+AC_PATH_PROG(PERL, perl, perl-not-found-in-path-error)
 AC_PROG_MAKE_SET
 AC_PROG_INSTALL
 
@@ -164,7 +165,6 @@ AM_PROG_LIBTOOL
 ACX_LT_HOST_FLAGS
 AC_SUBST(enable_shared)
 AC_SUBST(enable_static)
-AM_CONDITIONAL([ENABLE_DARWIN_AT_RPATH], [test x$enable_darwin_at_rpath = xyes])
 
 AM_MAINTAINER_MODE
 
@@ -285,24 +285,24 @@ esac
 GCC_LINUX_FUTEX(:)
 
 if test x$libgomp_thread_model != xmcf; then
-  # Check for pthread_{,attr_}[sg]etaffinity_np.
-  AC_LINK_IFELSE(
-   [AC_LANG_PROGRAM(
-    [#define _GNU_SOURCE
-     #include <pthread.h>],
-    [cpu_set_t cpuset;
-     pthread_attr_t attr;
-     pthread_getaffinity_np (pthread_self (), sizeof (cpu_set_t), &cpuset);
-     if (CPU_ISSET (0, &cpuset))
-       CPU_SET (1, &cpuset);
-     else
-       CPU_ZERO (&cpuset);
-     pthread_setaffinity_np (pthread_self (), sizeof (cpu_set_t), &cpuset);
-     pthread_attr_init (&attr);
-     pthread_attr_getaffinity_np (&attr, sizeof (cpu_set_t), &cpuset);
-     pthread_attr_setaffinity_np (&attr, sizeof (cpu_set_t), &cpuset);])],
-    AC_DEFINE(HAVE_PTHREAD_AFFINITY_NP, 1,
-  [	Define if pthread_{,attr_}{g,s}etaffinity_np is supported.]))
+# Check for pthread_{,attr_}[sg]etaffinity_np.
+AC_LINK_IFELSE(
+ [AC_LANG_PROGRAM(
+  [#define _GNU_SOURCE
+   #include <pthread.h>],
+  [cpu_set_t cpuset;
+   pthread_attr_t attr;
+   pthread_getaffinity_np (pthread_self (), sizeof (cpu_set_t), &cpuset);
+   if (CPU_ISSET (0, &cpuset))
+     CPU_SET (1, &cpuset);
+   else
+     CPU_ZERO (&cpuset);
+   pthread_setaffinity_np (pthread_self (), sizeof (cpu_set_t), &cpuset);
+   pthread_attr_init (&attr);
+   pthread_attr_getaffinity_np (&attr, sizeof (cpu_set_t), &cpuset);
+   pthread_attr_setaffinity_np (&attr, sizeof (cpu_set_t), &cpuset);])],
+  AC_DEFINE(HAVE_PTHREAD_AFFINITY_NP, 1,
+[	Define if pthread_{,attr_}{g,s}etaffinity_np is supported.]))
 fi
 
 # At least for glibc, clock_gettime is in librt.  But don't pull that
@@ -356,7 +356,7 @@ GCC_CHECK_TLS
 GCC_CHECK_EMUTLS
 
 # See what sort of export controls are available.
-GCC_CHECK_ATTRIBUTE_VISIBILITY
+LIBGOMP_CHECK_ATTRIBUTE_VISIBILITY
 LIBGOMP_CHECK_ATTRIBUTE_DLLEXPORT
 LIBGOMP_CHECK_ATTRIBUTE_ALIAS
 LIBGOMP_ENABLE_SYMVERS
@@ -374,19 +374,8 @@ AC_MSG_NOTICE([checking for flock implementation])
 AC_CHECK_PROGS(FLOCK, flock)
 # Fallback if 'perl' is available.
 if test -z "$FLOCK"; then
-  # These need to be absolute paths, yet at the same time need to
-  # canonicalize only relative paths, because then amd will not unmount
-  # drives. Thus the use of PWDCMD: set it to 'pawd' or 'amq -w' if using amd.
-  case $srcdir in
-changequote(,)dnl
-    [\\/$]* | ?:[\\/]*) libgomp_abs_srcdir=${srcdir} ;;
-changequote([,])dnl
-    *) libgomp_abs_srcdir=`cd "$srcdir" && ${PWDCMD-pwd} || echo "$srcdir"` ;;
-  esac
-  AC_CHECK_PROG(FLOCK, perl, $libgomp_abs_srcdir/testsuite/flock)
+  AC_CHECK_PROG(FLOCK, perl, $srcdir/testsuite/flock)
 fi
-
-AC_SUBST(SYSROOT_CFLAGS_FOR_TARGET)
 
 # Get target configury.
 . ${srcdir}/configure.tgt
@@ -437,9 +426,9 @@ if test x$libgomp_thread_model = xmcf; then
   link_gomp="-lgomp %{static: $LIBS -lmcfgthread}"
 else
   if test $enable_shared = yes; then
-    link_gomp="-lgomp %{static: $LIBS${DL_LIBS:+ $DL_LIBS}}"
+    link_gomp="-lgomp %{static: $LIBS}"
   else
-    link_gomp="-lgomp $LIBS${DL_LIBS:+ $DL_LIBS}"
+    link_gomp="-lgomp $LIBS"
   fi
 fi
 AC_SUBST(link_gomp)

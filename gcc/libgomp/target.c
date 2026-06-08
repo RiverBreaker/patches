@@ -1,4 +1,4 @@
-/* Copyright (C) 2013-2026 Free Software Foundation, Inc.
+/* Copyright (C) 2013-2023 Free Software Foundation, Inc.
    Contributed by Jakub Jelinek <jakub@redhat.com>.
 
    This file is part of the GNU Offloading and Multi Processing Library
@@ -47,13 +47,9 @@
 
 /* Define another splay tree instantiation - for reverse offload.  */
 #define splay_tree_prefix reverse
-#define splay_tree_static
 #define splay_tree_c
 #include "splay-tree.h"
 
-/* Used by omp_get_device_from_uid / omp_get_uid_from_device for the host.  */
-static char *str_omp_initial_device = "OMP_INITIAL_DEVICE";
-#define STR_OMP_DEV_PREFIX "OMP_DEV_"
 
 typedef uintptr_t *hash_entry_type;
 static inline void * htab_alloc (size_t size) { return gomp_malloc (size); }
@@ -153,35 +149,22 @@ gomp_get_num_devices (void)
   return num_devices_openmp;
 }
 
-static int
-gomp_get_default_device ()
-{
-  gomp_init_targets_once ();
-  struct gomp_task_icv *icv = gomp_icv (false);
-  return icv->default_device_var;
-}
-
 static struct gomp_device_descr *
 resolve_device (int device_id, bool remapped)
 {
-  /* Get number of devices and thus ensure that 'gomp_init_targets_once' was
-     called, which must be done before using default_device_var.  */
-  int num_devices = gomp_get_num_devices ();
-
-  if ((remapped && device_id == GOMP_DEVICE_ICV)
-      || device_id == GOMP_DEVICE_DEFAULT_OMP_61)
-    device_id = gomp_get_default_device ();
+  if (remapped && device_id == GOMP_DEVICE_ICV)
+    {
+      struct gomp_task_icv *icv = gomp_icv (false);
+      device_id = icv->default_device_var;
+      remapped = false;
+    }
 
   if (device_id < 0)
     {
       if (device_id == (remapped ? GOMP_DEVICE_HOST_FALLBACK
 				 : omp_initial_device))
 	return NULL;
-      if (gomp_target_offload_var == GOMP_TARGET_OFFLOAD_MANDATORY
-	  && num_devices == 0)
-	gomp_fatal ("OMP_TARGET_OFFLOAD is set to MANDATORY, "
-		    "but only the host device is available");
-      else if (device_id == omp_invalid_device)
+      if (device_id == omp_invalid_device)
 	gomp_fatal ("omp_invalid_device encountered");
       else if (gomp_target_offload_var == GOMP_TARGET_OFFLOAD_MANDATORY)
 	gomp_fatal ("OMP_TARGET_OFFLOAD is set to MANDATORY, "
@@ -189,10 +172,10 @@ resolve_device (int device_id, bool remapped)
 
       return NULL;
     }
-  else if (device_id >= num_devices)
+  else if (device_id >= gomp_get_num_devices ())
     {
       if (gomp_target_offload_var == GOMP_TARGET_OFFLOAD_MANDATORY
-	  && device_id != num_devices)
+	  && device_id != num_devices_openmp)
 	gomp_fatal ("OMP_TARGET_OFFLOAD is set to MANDATORY, "
 		    "but device not found");
 
@@ -389,8 +372,6 @@ gomp_to_device_kind_p (int kind)
     case GOMP_MAP_FORCE_ALLOC:
     case GOMP_MAP_FORCE_FROM:
     case GOMP_MAP_ALWAYS_FROM:
-    case GOMP_MAP_ALWAYS_PRESENT_FROM:
-    case GOMP_MAP_FORCE_PRESENT:
       return false;
     default:
       return true;
@@ -479,19 +460,6 @@ gomp_copy_dev2host (struct gomp_device_descr *devicep,
     gomp_device_copy (devicep, devicep->dev2host_func, "host", h, "dev", d, sz);
 }
 
-attribute_hidden void
-gomp_copy_dev2dev (struct gomp_device_descr *devicep,
-		   struct goacc_asyncqueue *aq,
-		   void *dst, const void *src, size_t sz)
-{
-  if (__builtin_expect (aq != NULL, 0))
-    goacc_device_copy_async (devicep, devicep->openacc.async.dev2dev_func,
-			     "dev", dst, "dev", src, NULL, sz, aq);
-  else
-    gomp_device_copy (devicep, devicep->dev2dev_func, "dev", dst,
-		      "dev", src, sz);
-}
-
 static void
 gomp_free_device_memory (struct gomp_device_descr *devicep, void *devptr)
 {
@@ -511,9 +479,7 @@ gomp_free_device_memory (struct gomp_device_descr *devicep, void *devptr)
 static inline void
 gomp_increment_refcount (splay_tree_key k, htab_t *refcount_set)
 {
-  if (k == NULL
-      || k->refcount == REFCOUNT_INFINITY
-      || k->refcount == REFCOUNT_ACC_MAP_DATA)
+  if (k == NULL || k->refcount == REFCOUNT_INFINITY)
     return;
 
   uintptr_t *refcount_ptr = &k->refcount;
@@ -557,9 +523,7 @@ static inline void
 gomp_decrement_refcount (splay_tree_key k, htab_t *refcount_set, bool delete_p,
 			 bool *do_copy, bool *do_remove)
 {
-  if (k == NULL
-      || k->refcount == REFCOUNT_INFINITY
-      || k->refcount == REFCOUNT_ACC_MAP_DATA)
+  if (k == NULL || k->refcount == REFCOUNT_INFINITY)
     {
       *do_copy = *do_remove = false;
       return;
@@ -643,7 +607,7 @@ gomp_map_vars_existing (struct gomp_device_descr *devicep,
   else
     tgt_var->length = newn->host_end - newn->host_start;
 
-  if (GOMP_MAP_FORCE_P (kind)
+  if ((kind & GOMP_MAP_FLAG_FORCE)
       /* For implicit maps, old contained in new is valid.  */
       || !(implicit_subset
 	   /* Otherwise, new contained inside old is considered valid.  */
@@ -742,7 +706,7 @@ gomp_map_pointer (struct target_mem_desc *tgt, struct goacc_asyncqueue *aq,
   if (n == NULL)
     {
       if (allow_zero_length_array_sections)
-	cur_node.tgt_offset = cur_node.host_start;
+	cur_node.tgt_offset = 0;
       else
 	{
 	  gomp_mutex_unlock (&devicep->lock);
@@ -781,7 +745,7 @@ gomp_map_fields_existing (struct target_mem_desc *tgt,
 
   cur_node.host_start = (uintptr_t) hostaddrs[i];
   cur_node.host_end = cur_node.host_start + sizes[i];
-  splay_tree_key n2 = gomp_map_0len_lookup (mem_map, &cur_node);
+  splay_tree_key n2 = splay_tree_lookup (mem_map, &cur_node);
   kind = get_kind (short_mapkind, kinds, i);
   implicit = get_implicit (short_mapkind, kinds, i);
   if (n2
@@ -831,22 +795,12 @@ gomp_map_fields_existing (struct target_mem_desc *tgt,
 	      (void *) cur_node.host_end);
 }
 
-/* Update the devptr by setting it to the device address of the host pointee
-   'attach_to'; devptr is obtained from the splay_tree_key n.
-   When the pointer is already attached or the host pointee is either
-   NULL or in memory map, this function returns true.
-   Otherwise, the device pointer is set to point to the host pointee and:
-   - If allow_zero_length_array_sections is set, true is returned.
-   - Else, if fail_if_not_found is set, a fatal error is issued.
-   - Otherwise, false is returned.  */
-
-attribute_hidden bool
+attribute_hidden void
 gomp_attach_pointer (struct gomp_device_descr *devicep,
 		     struct goacc_asyncqueue *aq, splay_tree mem_map,
 		     splay_tree_key n, uintptr_t attach_to, size_t bias,
 		     struct gomp_coalesce_buf *cbufp,
-		     bool allow_zero_length_array_sections,
-		     bool fail_if_not_found)
+		     bool allow_zero_length_array_sections)
 {
   struct splay_tree_key_s s;
   size_t size, idx;
@@ -888,20 +842,8 @@ gomp_attach_pointer (struct gomp_device_descr *devicep,
 
       if ((void *) target == NULL)
 	{
-	  /* As a special case, allow attaching NULL host pointers.  This
-	     allows e.g. unassociated Fortran pointers to be mapped
-	     properly.  */
-	  data = 0;
-
-	  gomp_debug (1,
-		      "%s: attaching NULL host pointer, target %p "
-		      "(struct base %p)\n", __FUNCTION__, (void *) devptr,
-		      (void *) (n->tgt->tgt_start + n->tgt_offset));
-
-	  gomp_copy_host2dev (devicep, aq, (void *) devptr, (void *) &data,
-			      sizeof (void *), true, cbufp);
-
-	  return true;
+	  gomp_mutex_unlock (&devicep->lock);
+	  gomp_fatal ("attempt to attach null pointer");
 	}
 
       s.host_start = target + bias;
@@ -910,16 +852,16 @@ gomp_attach_pointer (struct gomp_device_descr *devicep,
 
       if (!tn)
 	{
-	  /* We copy the host pointer when the target region is not mapped;
-	     for allow_zero_length_array_sections, that's permitted.
-	     Otherwise, it depends on the context. Return false in that
-	     case, unless fail_if_not_found.  */
-	  if (!allow_zero_length_array_sections && fail_if_not_found)
+	  if (allow_zero_length_array_sections)
+	    /* When allowing attachment to zero-length array sections, we
+	       allow attaching to NULL pointers when the target region is not
+	       mapped.  */
+	    data = 0;
+	  else
 	    {
 	      gomp_mutex_unlock (&devicep->lock);
 	      gomp_fatal ("pointer target not mapped for attach");
 	    }
-	  data = target;
 	}
       else
 	data = tn->tgt->tgt_start + tn->tgt_offset + target - tn->host_start;
@@ -931,13 +873,10 @@ gomp_attach_pointer (struct gomp_device_descr *devicep,
 
       gomp_copy_host2dev (devicep, aq, (void *) devptr, (void *) &data,
 			  sizeof (void *), true, cbufp);
-      if (!tn && !allow_zero_length_array_sections)
-	return false;
     }
   else
     gomp_debug (1, "%s: attach count for %p -> %u\n", __FUNCTION__,
 		(void *) attach_to, (int) n->aux->attach_count[idx]);
-  return true;
 }
 
 attribute_hidden void
@@ -1021,193 +960,14 @@ gomp_map_val (struct target_mem_desc *tgt, void **hostaddrs, size_t i)
     }
 }
 
-static const char *
-kind_to_name (unsigned short kind, bool short_mapkind)
-{
-  if (short_mapkind && GOMP_MAP_IMPLICIT_P (kind))
-    kind &= ~GOMP_MAP_IMPLICIT;
-
-  switch (kind & (short_mapkind ? 0xff : 0x7))
-    {
-    case GOMP_MAP_ALLOC: return "GOMP_MAP_ALLOC";
-    case GOMP_MAP_TO: return "GOMP_MAP_TO";
-    case GOMP_MAP_FROM: return "GOMP_MAP_FROM";
-    case GOMP_MAP_TOFROM: return "GOMP_MAP_TOFROM";
-    case GOMP_MAP_POINTER: return "GOMP_MAP_POINTER";
-    case GOMP_MAP_TO_PSET: return "GOMP_MAP_TO_PSET";
-    case GOMP_MAP_FORCE_PRESENT: return "GOMP_MAP_FORCE_PRESENT";
-    case GOMP_MAP_DELETE: return "GOMP_MAP_DELETE";
-    case GOMP_MAP_FORCE_DEVICEPTR: return "GOMP_MAP_FORCE_DEVICEPTR";
-    case GOMP_MAP_DEVICE_RESIDENT: return "GOMP_MAP_DEVICE_RESIDENT";
-    case GOMP_MAP_LINK: return "GOMP_MAP_LINK";
-    case GOMP_MAP_IF_PRESENT: return "GOMP_MAP_IF_PRESENT";
-    case GOMP_MAP_FIRSTPRIVATE: return "GOMP_MAP_FIRSTPRIVATE";
-    case GOMP_MAP_FIRSTPRIVATE_INT: return "GOMP_MAP_FIRSTPRIVATE_INT";
-    case GOMP_MAP_USE_DEVICE_PTR: return "GOMP_MAP_USE_DEVICE_PTR";
-    case GOMP_MAP_ZERO_LEN_ARRAY_SECTION: return "GOMP_MAP_ZERO_LEN_ARRAY_SECTION";
-    case GOMP_MAP_FORCE_ALLOC: return "GOMP_MAP_FORCE_ALLOC";
-    case GOMP_MAP_FORCE_TO: return "GOMP_MAP_FORCE_TO";
-    case GOMP_MAP_FORCE_FROM: return "GOMP_MAP_FORCE_FROM";
-    case GOMP_MAP_FORCE_TOFROM: return "GOMP_MAP_FORCE_TOFROM";
-    case GOMP_MAP_USE_DEVICE_PTR_IF_PRESENT:
-      return "GOMP_MAP_USE_DEVICE_PTR_IF_PRESENT";
-    case GOMP_MAP_ALWAYS_TO: return "GOMP_MAP_ALWAYS_TO";
-    case GOMP_MAP_ALWAYS_FROM: return "GOMP_MAP_ALWAYS_FROM";
-    case GOMP_MAP_ALWAYS_TOFROM: return "GOMP_MAP_ALWAYS_TOFROM";
-    case GOMP_MAP_ALWAYS_PRESENT_TO: return "GOMP_MAP_ALWAYS_PRESENT_TO";
-    case GOMP_MAP_ALWAYS_PRESENT_FROM: return "GOMP_MAP_ALWAYS_PRESENT_FROM";
-    case GOMP_MAP_ALWAYS_PRESENT_TOFROM: return "GOMP_MAP_ALWAYS_PRESENT_TOFROM";
-    case GOMP_MAP_STRUCT: return "GOMP_MAP_STRUCT";
-    case GOMP_MAP_STRUCT_UNORD: return "GOMP_MAP_STRUCT_UNORD";
-    case GOMP_MAP_ALWAYS_POINTER: return "GOMP_MAP_ALWAYS_POINTER";
-    case GOMP_MAP_POINTER_TO_ZERO_LENGTH_ARRAY_SECTION:
-      return "GOMP_MAP_POINTER_TO_ZERO_LENGTH_ARRAY_SECTION";
-    case GOMP_MAP_DELETE_ZERO_LEN_ARRAY_SECTION:
-      return "GOMP_MAP_DELETE_ZERO_LENGTH_ARRAY_SECTION";
-    case GOMP_MAP_RELEASE: return "GOMP_MAP_RELEASE";
-    case GOMP_MAP_ATTACH: return "GOMP_MAP_ATTACH";
-    case GOMP_MAP_DETACH: return "GOMP_MAP_DETACH";
-    case GOMP_MAP_FORCE_DETACH: return "GOMP_MAP_FORCE_DETACH";
-    case GOMP_MAP_ATTACH_ZERO_LENGTH_ARRAY_SECTION:
-      return "GOMP_MAP_ATTACH_ZERO_LENGTH_ARRAY_SECTION";
-    default: return "unknown";
-    }
-}
-
-/*  When GCC encounters a clause with an iterator, e.g.:
-
-   #pragma omp target map (iterator(i=0:4), to: x[i])
-
-   it generates an array containing the number of iterations and the
-   address and size of each iteration. e.g.:
-
-   void *omp_iter_data[] = {
-     (void *) 4, // Number of iterations
-     &x[0], (void *) sizeof(x[0]),
-     &x[1], (void *) sizeof(x[1]),
-     &x[2], (void *) sizeof(x[2]),
-     &x[3], (void *) sizeof(x[3])
-   };
-
-   When the construct is lowered, &omp_iter_data is used as the host address
-   for the map (instead of &x[i]), and the size is set to SIZE_MAX to mark
-   the map as an iterator map.
-
-   Map entries containing expanded iterators will be flattened and merged into
-   HOSTADDRS, SIZES and KINDS, and MAPNUM updated.  Returns true if there are
-   any iterators found.  ITERATOR_COUNT holds the iteration count of the
-   iterator that generates each map (and 0 if not generated from an iterator).
-   HOSTADDRS, SIZES, KINDS and ITERATOR_COUNT must be freed afterwards if any
-   merging occurs.  */
-
-static bool
-gomp_merge_iterator_maps (size_t *mapnum, void ***hostaddrs, size_t **sizes,
-			  void **kinds, size_t **iterator_count)
-{
-  bool iterator_p = false;
-  size_t map_count = 0;
-  unsigned short **skinds = (unsigned short **) kinds;
-
-  for (size_t i = 0; i < *mapnum; i++)
-    if ((*sizes)[i] == SIZE_MAX)
-      {
-	uintptr_t *iterator_array = (*hostaddrs)[i];
-	map_count += iterator_array[0];
-	iterator_p = true;
-      }
-    else
-      map_count++;
-
-  if (!iterator_p)
-    return false;
-
-  gomp_debug (1,
-	      "Expanding iterator maps - number of map entries: %u -> %u\n",
-	      (int) *mapnum, (int) map_count);
-  void **new_hostaddrs = (void **) gomp_malloc (map_count * sizeof (void *));
-  size_t *new_sizes = (size_t *) gomp_malloc (map_count * sizeof (size_t));
-  unsigned short *new_kinds
-    = (unsigned short *) gomp_malloc (map_count * sizeof (unsigned short));
-  size_t new_idx = 0;
-  *iterator_count = (size_t *) gomp_malloc (map_count * sizeof (size_t));
-
-  for (size_t i = 0; i < *mapnum; i++)
-    {
-      if ((*sizes)[i] == SIZE_MAX)
-	{
-	  uintptr_t *iterator_array = (*hostaddrs)[i];
-	  size_t count = *iterator_array++;
-	  for (size_t j = 0; j < count; j++)
-	    {
-	      new_hostaddrs[new_idx] = (void *) *iterator_array++;
-	      new_sizes[new_idx] = *iterator_array++;
-	      new_kinds[new_idx] = (*skinds)[i];
-	      (*iterator_count)[new_idx] = j + 1;
-	      gomp_debug (1,
-			  "Expanding map %u <%s>: "
-			  "hostaddrs[%u] = %p, sizes[%u] = %lu\n",
-			  (int) i, kind_to_name (new_kinds[new_idx], true),
-			  (int) new_idx, new_hostaddrs[new_idx],
-			  (int) new_idx, (unsigned long) new_sizes[new_idx]);
-	      new_idx++;
-	    }
-	}
-      else
-	{
-	  new_hostaddrs[new_idx] = (*hostaddrs)[i];
-	  new_sizes[new_idx] = (*sizes)[i];
-	  new_kinds[new_idx] = (*skinds)[i];
-	  (*iterator_count)[new_idx] = 0;
-	  new_idx++;
-	}
-    }
-
-  *mapnum = map_count;
-  *hostaddrs = new_hostaddrs;
-  *sizes = new_sizes;
-  *kinds = new_kinds;
-
-  return true;
-}
-
-static void
-gomp_present_fatal (void *addr, size_t size, struct gomp_device_descr *devicep)
-{
-  gomp_mutex_unlock (&devicep->lock);
-#ifdef HAVE_INTTYPES_H
-  gomp_fatal ("present clause: not present on the device "
-	      "(addr: %p, size: %" PRIu64 " (0x%" PRIx64 "), "
-	      "dev: %d)",
-	      addr, (uint64_t) size, (uint64_t) size, devicep->target_id);
-#else
-  gomp_fatal ("present clause: not present on the device "
-	      "(addr: %p, size: %lu (0x%lx), dev: %d)",
-	      addr, (unsigned long) size, (unsigned long) size,
-	      devicep->target_id);
-#endif
-}
-
-/* Get size of region required for target variable table for MAPNUM
-   mappings.  */
-
-static inline size_t
-gomp_get_tvt_size (size_t mapnum)
-{
-  return mapnum * sizeof (void *);
-}
-
 static inline __attribute__((always_inline)) struct target_mem_desc *
 gomp_map_vars_internal (struct gomp_device_descr *devicep,
 			struct goacc_asyncqueue *aq, size_t mapnum,
 			void **hostaddrs, void **devaddrs, size_t *sizes,
 			void *kinds, bool short_mapkind,
 			htab_t *refcount_set,
-			enum gomp_map_vars_kind pragma_kind,
-			struct gomp_offload_session *session)
+			enum gomp_map_vars_kind pragma_kind)
 {
-  bool target_p = pragma_kind & GOMP_MAP_VARS_TARGET;
-  assert (/* SESSION must be present iff doing target offload.  */
-	  !!session == target_p);
   size_t i, tgt_align, tgt_size, not_found_cnt = 0;
   bool has_firstprivate = false;
   bool has_always_ptrset = false;
@@ -1216,11 +976,6 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
   const int typemask = short_mapkind ? 0xff : 0x7;
   struct splay_tree_s *mem_map = &devicep->mem_map;
   struct splay_tree_key_s cur_node;
-  bool iterators_p = false;
-  size_t *iterator_count = NULL;
-  if (short_mapkind)  /* OpenMP */
-    iterators_p = gomp_merge_iterator_maps (&mapnum, &hostaddrs, &sizes,
-					    &kinds, &iterator_count);
   struct target_mem_desc *tgt
     = gomp_malloc (sizeof (*tgt) + sizeof (tgt->list[0]) * mapnum);
   tgt->list_count = mapnum;
@@ -1233,10 +988,30 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
     {
       tgt->tgt_start = 0;
       tgt->tgt_end = 0;
-      if (session)
-	/* We promise to always call either set_tvt or alloc_tvt.  */
-	devicep->session.set_tvt_func (session, NULL);
       return tgt;
+    }
+
+  tgt_align = sizeof (void *);
+  tgt_size = 0;
+  cbuf.chunks = NULL;
+  cbuf.chunk_cnt = -1;
+  cbuf.use_cnt = 0;
+  cbuf.buf = NULL;
+  if (mapnum > 1 || (pragma_kind & GOMP_MAP_VARS_TARGET))
+    {
+      size_t chunks_size = (mapnum + 1) * sizeof (struct gomp_coalesce_chunk);
+      cbuf.chunks = (struct gomp_coalesce_chunk *) gomp_alloca (chunks_size);
+      cbuf.chunk_cnt = 0;
+    }
+  if (pragma_kind & GOMP_MAP_VARS_TARGET)
+    {
+      size_t align = 4 * sizeof (void *);
+      tgt_align = align;
+      tgt_size = mapnum * sizeof (void *);
+      cbuf.chunk_cnt = 1;
+      cbuf.use_cnt = 1 + (mapnum > 1);
+      cbuf.chunks[0].start = 0;
+      cbuf.chunks[0].end = tgt_size;
     }
 
   gomp_mutex_lock (&devicep->lock);
@@ -1245,48 +1020,6 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
       gomp_mutex_unlock (&devicep->lock);
       free (tgt);
       return NULL;
-    }
-
-  /* Target variable table in host memory.  If we're doing target offloading,
-     we'll let the plugin attempt to allocate it..  */
-  void **host_tvt = NULL;
-  if (target_p && devicep->session.alloc_tvt_func)
-    {
-      host_tvt = (devicep->session.alloc_tvt_func
-		  (session, gomp_get_tvt_size (mapnum)));
-      assert ((((uintptr_t)host_tvt) % __BIGGEST_ALIGNMENT__) == 0);
-    }
-
-  /* True if we need to allocate the target var table, i.e. when doing
-     offloading and when we fail to allocate it above.  */
-  bool need_tvt_alloc = !host_tvt && target_p;
-
-  /* Initialize size tracking variables.  */
-  tgt_align = sizeof (void *);
-  tgt_size = 0;
-
-  /* Prepare coalesce buffer.  */
-  cbuf.chunks = NULL;
-  cbuf.chunk_cnt = -1;
-  cbuf.use_cnt = 0;
-  cbuf.buf = NULL;
-  if (mapnum > 1 || !host_tvt)
-    {
-      size_t chunks_size = (mapnum + 1) * sizeof (struct gomp_coalesce_chunk);
-      cbuf.chunks = (struct gomp_coalesce_chunk *) gomp_alloca (chunks_size);
-      cbuf.chunk_cnt = 0;
-    }
-
-  if (need_tvt_alloc)
-    {
-      /* Prepare for allocating the target variable table.  */
-      size_t align = 4 * sizeof (void *);
-      tgt_align = align;
-      tgt_size = gomp_get_tvt_size (mapnum);
-      cbuf.chunk_cnt = 1;
-      cbuf.use_cnt = 1 + (mapnum > 1);
-      cbuf.chunks[0].start = 0;
-      cbuf.chunks[0].end = tgt_size;
     }
 
   for (i = 0; i < mapnum; i++)
@@ -1343,8 +1076,7 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
 	    tgt->list[i].offset = 0;
 	  continue;
 	}
-      else if ((kind & typemask) == GOMP_MAP_STRUCT
-	       || (kind & typemask) == GOMP_MAP_STRUCT_UNORD)
+      else if ((kind & typemask) == GOMP_MAP_STRUCT)
 	{
 	  size_t first = i + 1;
 	  size_t last = i + sizes[i];
@@ -1368,8 +1100,7 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
 		  tgt->list[i].key = NULL;
 		  if (!aq
 		      && gomp_to_device_kind_p (get_kind (short_mapkind, kinds, i)
-						& typemask)
-		      && sizes[i] != 0)
+						& typemask))
 		    gomp_coalesce_buf_add (&cbuf,
 					   tgt_size - cur_node.host_end
 					   + (uintptr_t) hostaddrs[i],
@@ -1426,7 +1157,7 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
 	  if (!n)
 	    {
 	      tgt->list[i].key = NULL;
-	      tgt->list[i].offset = OFFSET_INLINED;
+	      tgt->list[i].offset = OFFSET_POINTER;
 	      continue;
 	    }
 	}
@@ -1545,7 +1276,7 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
       tgt->tgt_start = (uintptr_t) tgt->to_free;
       tgt->tgt_end = tgt->tgt_start + sizes[0];
     }
-  else if (not_found_cnt || need_tvt_alloc || has_firstprivate)
+  else if (not_found_cnt || (pragma_kind & GOMP_MAP_VARS_TARGET))
     {
       /* Allocate tgt_align aligned tgt_size block of memory.  */
       /* FIXME: Perhaps change interface to allocate properly aligned
@@ -1583,8 +1314,8 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
     }
 
   tgt_size = 0;
-  if (need_tvt_alloc)
-    tgt_size = gomp_get_tvt_size (mapnum);
+  if (pragma_kind & GOMP_MAP_VARS_TARGET)
+    tgt_size = mapnum * sizeof (void *);
 
   tgt->array = NULL;
   if (not_found_cnt || has_firstprivate || has_always_ptrset)
@@ -1595,7 +1326,6 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
       size_t j, field_tgt_offset = 0, field_tgt_clear = FIELD_TGT_EMPTY;
       uintptr_t field_tgt_base = 0;
       splay_tree_key field_tgt_structelem_first = NULL;
-      bool ref_ptee_not_present = false;
 
       for (i = 0; i < mapnum; i++)
 	if (has_always_ptrset
@@ -1666,7 +1396,7 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
 		gomp_copy_host2dev (devicep, aq,
 				    (void *) (tgt->tgt_start + tgt_size),
 				    (void *) hostaddrs[i], len, false, cbufp);
-		/* Save device address in hostaddr to permit latter availability
+		/* Save device address in hostaddr to permit latter availablity
 		   when doing a deep-firstprivate with pointer attach.  */
 		hostaddrs[i] = (void *) (tgt->tgt_start + tgt_size);
 		tgt_size += len;
@@ -1729,20 +1459,6 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
 		    tgt->list[i].offset = OFFSET_INLINED;
 		  }
 		continue;
-	      case GOMP_MAP_STRUCT_UNORD:
-		if (sizes[i] > 1)
-		  {
-		    for (size_t j = i + 1; j < i + sizes[i]; j++)
-		      if (hostaddrs[j + 1] < hostaddrs[j])
-			{
-			  gomp_mutex_unlock (&devicep->lock);
-			  gomp_fatal (
-			    "Mapped array elements must be the same or in "
-			    "increasing address order (got %p > %p)",
-			    hostaddrs[j], hostaddrs[j + 1]);
-			}
-		  }
-		/* Fallthrough.  */
 	      case GOMP_MAP_STRUCT:
 		first = i + 1;
 		last = i + sizes[i];
@@ -1751,17 +1467,7 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
 				    + sizes[last];
 		if (tgt->list[first].key != NULL)
 		  continue;
-		if (sizes[last] == 0)
-		  cur_node.host_end++;
 		n = splay_tree_lookup (mem_map, &cur_node);
-		if (sizes[last] == 0)
-		  cur_node.host_end--;
-		if (n == NULL && cur_node.host_start == cur_node.host_end)
-		  {
-		    gomp_mutex_unlock (&devicep->lock);
-		    gomp_fatal ("Struct pointer member not mapped (%p)",
-				(void*) hostaddrs[first]);
-		  }
 		if (n == NULL)
 		  {
 		    size_t align = (size_t) 1 << (kind >> rshift);
@@ -1839,37 +1545,9 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
 		      bool zlas
 			= ((kind & typemask)
 			   == GOMP_MAP_ATTACH_ZERO_LENGTH_ARRAY_SECTION);
-		      /* For 'target enter data', the map clauses are split;
-			 however, for more complex code with struct and
-			 pointer members, the mapping and the attach can end up
-			 in different sets; or the wrong mapping with the
-			 attach. As there is no way to know whether a size
-			 zero like  'var->ptr[i][:0]' happened in the same
-			 directive or not, the not-attached check is now
-			 fully silenced for 'enter data'.  */
-		      if (openmp_p && (pragma_kind & GOMP_MAP_VARS_ENTER_DATA))
-			zlas = true;
-		      if (!gomp_attach_pointer (devicep, aq, mem_map, n,
-						(uintptr_t) hostaddrs[i], sizes[i],
-						cbufp, zlas, !openmp_p))
-			{
-			  /* Pointee not found; that's an error except for
-			     map(var[:n]) with n == 0; the compiler adds a
-			     runtime condition such that for those the kind is
-			     always GOMP_MAP_ZERO_LEN_ARRAY_SECTION.  */
-			  for (j = i; j > 0; j--)
-			    if (*(void**) hostaddrs[i] == hostaddrs[j-1] - sizes[i]
-				&& sizes[j-1] == 0
-				&& (GOMP_MAP_ZERO_LEN_ARRAY_SECTION
-				    == (get_kind (short_mapkind, kinds, j-1)
-					& typemask)))
-			      break;
-			  if (j == 0)
-			    {
-			      gomp_mutex_unlock (&devicep->lock);
-			      gomp_fatal ("pointer target not mapped for attach");
-			    }
-			}
+		      gomp_attach_pointer (devicep, aq, mem_map, n,
+					   (uintptr_t) hostaddrs[i], sizes[i],
+					   cbufp, zlas);
 		    }
 		  else if ((pragma_kind & GOMP_MAP_VARS_OPENACC) != 0)
 		    {
@@ -1889,40 +1567,9 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
 	      k->host_end = k->host_start + sizeof (void *);
 	    splay_tree_key n = splay_tree_lookup (mem_map, k);
 	    if (n && n->refcount != REFCOUNT_LINK)
-	      {
-		if (field_tgt_clear != FIELD_TGT_EMPTY)
-		  {
-		    /* For this condition to be true, there must be a
-		       duplicate struct element mapping.  This can happen with
-		       GOMP_MAP_STRUCT_UNORD mappings, for example.  */
-		    tgt->list[i].key = n;
-		    if (openmp_p)
-		      {
-			assert ((n->refcount & REFCOUNT_STRUCTELEM) != 0);
-			assert (field_tgt_structelem_first != NULL);
-
-			if (i == field_tgt_clear)
-			  {
-			    n->refcount |= REFCOUNT_STRUCTELEM_FLAG_LAST;
-			    field_tgt_structelem_first = NULL;
-			  }
-		      }
-		    if (i == field_tgt_clear)
-		      field_tgt_clear = FIELD_TGT_EMPTY;
-		    gomp_increment_refcount (n, refcount_set);
-		    tgt->list[i].copy_from
-		      = GOMP_MAP_COPY_FROM_P (kind & typemask);
-		    tgt->list[i].always_copy_from
-		      = GOMP_MAP_ALWAYS_FROM_P (kind & typemask);
-		    tgt->list[i].is_attach = false;
-		    tgt->list[i].offset = 0;
-		    tgt->list[i].length = k->host_end - k->host_start;
-		  }
-		else
-		  gomp_map_vars_existing (devicep, aq, n, k, &tgt->list[i],
-					  kind & typemask, false, implicit,
-					  cbufp, refcount_set);
-	      }
+	      gomp_map_vars_existing (devicep, aq, n, k, &tgt->list[i],
+				      kind & typemask, false, implicit, cbufp,
+				      refcount_set);
 	    else
 	      {
 		k->aux = NULL;
@@ -2003,7 +1650,6 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
 		  case GOMP_MAP_FORCE_TOFROM:
 		  case GOMP_MAP_ALWAYS_TO:
 		  case GOMP_MAP_ALWAYS_TOFROM:
-		  map_to:
 		    gomp_copy_host2dev (devicep, aq,
 					(void *) (tgt->tgt_start
 						  + k->tgt_offset),
@@ -2020,9 +1666,6 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
 			== GOMP_MAP_POINTER_TO_ZERO_LENGTH_ARRAY_SECTION));
 		    break;
 		  case GOMP_MAP_TO_PSET:
-		    if (ref_ptee_not_present)
-		      gomp_present_fatal ((void *) k->host_start,
-					  k->host_end - k->host_start, devicep);
 		    gomp_copy_host2dev (devicep, aq,
 					(void *) (tgt->tgt_start
 						  + k->tgt_offset),
@@ -2068,21 +1711,21 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
 		    i = j - 1;
 		    break;
 		  case GOMP_MAP_FORCE_PRESENT:
-		  case GOMP_MAP_ALWAYS_PRESENT_TO:
-		  case GOMP_MAP_ALWAYS_PRESENT_FROM:
-		  case GOMP_MAP_ALWAYS_PRESENT_TOFROM:
 		    {
-		      if (i + 1 < mapnum
-			  && (get_kind (short_mapkind, kinds, i + 1) & typemask)
-			       == GOMP_MAP_TO_PSET)
-			{
-			  ref_ptee_not_present = true;
-			  goto map_to;
-			}
 		      /* We already looked up the memory region above and it
 			 was missing.  */
-		      gomp_present_fatal ((void *) k->host_start,
-					  k->host_end - k->host_start, devicep);
+		      size_t size = k->host_end - k->host_start;
+		      gomp_mutex_unlock (&devicep->lock);
+#ifdef HAVE_INTTYPES_H
+		      gomp_fatal ("present clause: !acc_is_present (%p, "
+				  "%"PRIu64" (0x%"PRIx64"))",
+				  (void *) k->host_start,
+				  (uint64_t) size, (uint64_t) size);
+#else
+		      gomp_fatal ("present clause: !acc_is_present (%p, "
+				  "%lu (0x%lx))", (void *) k->host_start,
+				  (unsigned long) size, (unsigned long) size);
+#endif
 		    }
 		    break;
 		  case GOMP_MAP_FORCE_DEVICEPTR:
@@ -2102,11 +1745,8 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
 		if (k->aux && k->aux->link_key)
 		  {
 		    /* Set link pointer on target to the device address of the
-		       mapped object.  Also deal with offsets due to
-		       array-section mapping.  */
-		    void *tgt_addr = (void *) (tgt->tgt_start + k->tgt_offset
-					       - (k->host_start
-						  - k->aux->link_key->host_start));
+		       mapped object.  */
+		    void *tgt_addr = (void *) (tgt->tgt_start + k->tgt_offset);
 		    /* We intentionally do not use coalescing here, as it's not
 		       data allocated by the current call to this function.  */
 		    gomp_copy_host2dev (devicep, aq, (void *) n->tgt_offset,
@@ -2117,36 +1757,16 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
 	  }
     }
 
-  if (target_p)
+  if (pragma_kind & GOMP_MAP_VARS_TARGET)
     {
-      /* The target variables table is constructed with maps using iterators
-	 unexpanded. Now that the iterator maps are expanded, we will need to
-	 skip all expanded maps after the initial entry, otherwise subsequent
-	 maps will be out-of-sync with their corresponding entry in the
-	 target variables table.  */
-      size_t map_num = 0;
       for (i = 0; i < mapnum; i++)
-	if (!iterator_count || iterator_count[i] <= 1)
-	  {
-	    cur_node.tgt_offset = gomp_map_val (tgt, hostaddrs, i);
-	    if (host_tvt)
-	      /* In this case, it's on the host.  */
-	      memcpy (&host_tvt[map_num], &cur_node.tgt_offset,
-		      sizeof (void *));
-	    else
-	      /* Otherwise, the table is on the device.  */
-	      gomp_copy_host2dev (devicep, aq,
-				  (void *) (tgt->tgt_start + map_num * sizeof (void *)),
-				  (void *) &cur_node.tgt_offset, sizeof (void *),
-				  true, cbufp);
-	    map_num++;
-	  }
-
-      if (!host_tvt)
-	/* The call to GOMP_OFFLOAD_session_allocate_target_var_table failed,
-	   so we must inform the session about the target var table we
-	   allocated.  */
-	devicep->session.set_tvt_func (session, (void **) tgt->tgt_start);
+	{
+	  cur_node.tgt_offset = gomp_map_val (tgt, hostaddrs, i);
+	  gomp_copy_host2dev (devicep, aq,
+			      (void *) (tgt->tgt_start + i * sizeof (void *)),
+			      (void *) &cur_node.tgt_offset, sizeof (void *),
+			      true, cbufp);
+	}
     }
 
   if (cbufp)
@@ -2178,15 +1798,6 @@ gomp_map_vars_internal (struct gomp_device_descr *devicep,
     }
 
   gomp_mutex_unlock (&devicep->lock);
-
-  if (iterators_p)
-    {
-      free (hostaddrs);
-      free (sizes);
-      free (kinds);
-      free (iterator_count);
-    }
-
   return tgt;
 }
 
@@ -2194,8 +1805,7 @@ static struct target_mem_desc *
 gomp_map_vars (struct gomp_device_descr *devicep, size_t mapnum,
 	       void **hostaddrs, void **devaddrs, size_t *sizes, void *kinds,
 	       bool short_mapkind, htab_t *refcount_set,
-	       enum gomp_map_vars_kind pragma_kind,
-	       struct gomp_offload_session *session)
+	       enum gomp_map_vars_kind pragma_kind)
 {
   /* This management of a local refcount_set is for convenience of callers
      who do not share a refcount_set over multiple map/unmap uses.  */
@@ -2209,7 +1819,7 @@ gomp_map_vars (struct gomp_device_descr *devicep, size_t mapnum,
   struct target_mem_desc *tgt;
   tgt = gomp_map_vars_internal (devicep, NULL, mapnum, hostaddrs, devaddrs,
 				sizes, kinds, short_mapkind, refcount_set,
-				pragma_kind, session);
+				pragma_kind);
   if (local_refcount_set)
     htab_free (local_refcount_set);
 
@@ -2221,13 +1831,11 @@ goacc_map_vars (struct gomp_device_descr *devicep,
 		struct goacc_asyncqueue *aq, size_t mapnum,
 		void **hostaddrs, void **devaddrs, size_t *sizes,
 		void *kinds, bool short_mapkind,
-		enum gomp_map_vars_kind pragma_kind,
-		struct gomp_offload_session *session)
+		enum gomp_map_vars_kind pragma_kind)
 {
   return gomp_map_vars_internal (devicep, aq, mapnum, hostaddrs, devaddrs,
 				 sizes, kinds, short_mapkind, NULL,
-				 GOMP_MAP_VARS_OPENACC | pragma_kind,
-				 session);
+				 GOMP_MAP_VARS_OPENACC | pragma_kind);
 }
 
 static void
@@ -2403,9 +2011,8 @@ gomp_unmap_vars_internal (struct target_mem_desc *tgt, bool do_copyfrom,
 			    tgt->list[i].length);
       if (do_remove)
 	{
-	  struct target_mem_desc *k_tgt __attribute__((unused)) = k->tgt;
-	  bool is_tgt_unmapped __attribute__((unused))
-	    = gomp_remove_var (devicep, k);
+	  struct target_mem_desc *k_tgt = k->tgt;
+	  bool is_tgt_unmapped = gomp_remove_var (devicep, k);
 	  /* It would be bad if TGT got unmapped while we're still iterating
 	     over its LIST_COUNT, and also expect to use it in the following
 	     code.  */
@@ -2456,18 +2063,12 @@ gomp_update (struct gomp_device_descr *devicep, size_t mapnum, void **hostaddrs,
   size_t i;
   struct splay_tree_key_s cur_node;
   const int typemask = short_mapkind ? 0xff : 0x7;
-  bool iterators_p = false;
-  size_t *iterator_count = NULL;
 
   if (!devicep)
     return;
 
   if (mapnum == 0)
     return;
-
-  if (short_mapkind)  /* OpenMP */
-    iterators_p = gomp_merge_iterator_maps (&mapnum, &hostaddrs, &sizes,
-					    &kinds, &iterator_count);
 
   gomp_mutex_lock (&devicep->lock);
   if (devicep->state == GOMP_DEVICE_FINALIZED)
@@ -2537,27 +2138,8 @@ gomp_update (struct gomp_device_descr *devicep, size_t mapnum, void **hostaddrs,
 		  gomp_copy_dev2host (devicep, NULL, hostaddr, devaddr, size);
 	      }
 	  }
-	else
-	  {
-	    int kind = get_kind (short_mapkind, kinds, i);
-
-	    if (GOMP_MAP_PRESENT_P (kind))
-	      {
-		/* We already looked up the memory region above and it
-		   was missing.  */
-		gomp_present_fatal (hostaddrs[i], sizes[i], devicep);
-	      }
-	  }
       }
   gomp_mutex_unlock (&devicep->lock);
-
-  if (iterators_p)
-    {
-      free (hostaddrs);
-      free (sizes);
-      free (kinds);
-      free (iterator_count);
-    }
 }
 
 static struct gomp_offload_icv_list *
@@ -2649,20 +2231,11 @@ gomp_load_image_to_device (struct gomp_device_descr *devicep, unsigned version,
   void **host_funcs_end  = ((void ***) host_table)[1];
   void **host_var_table  = ((void ***) host_table)[2];
   void **host_vars_end   = ((void ***) host_table)[3];
-  void **host_ind_func_table = NULL;
-  void **host_ind_funcs_end  = NULL;
 
-  if (GOMP_VERSION_SUPPORTS_INDIRECT_FUNCS (version))
-    {
-      host_ind_func_table = ((void ***) host_table)[4];
-      host_ind_funcs_end  = ((void ***) host_table)[5];
-    }
-
-  /* The func and ind_func tables contain only addresses, the var table
-     contains addresses and corresponding sizes.  */
+  /* The func table contains only addresses, the var table contains addresses
+     and corresponding sizes.  */
   int num_funcs = host_funcs_end - host_func_table;
   int num_vars  = (host_vars_end - host_var_table) / 2;
-  int num_ind_funcs = (host_ind_funcs_end - host_ind_func_table);
 
   /* Load image to device and get target addresses for the image.  */
   struct addr_pair *target_table = NULL;
@@ -2675,18 +2248,17 @@ gomp_load_image_to_device (struct gomp_device_descr *devicep, unsigned version,
   num_target_entries
     = devicep->load_image_func (devicep->target_id, version,
 				target_data, &target_table,
-				rev_lookup ? &rev_target_fn_table : NULL,
-				num_ind_funcs
-				  ? (uint64_t *) host_ind_func_table : NULL);
+				rev_lookup ? &rev_target_fn_table : NULL);
 
-  /* The "+1" is due to the additional ICV struct.  */
-  if (num_target_entries != num_funcs + num_vars + 1)
+  if (num_target_entries != num_funcs + num_vars
+      /* "+1" due to the additional ICV struct.  */
+      && num_target_entries != num_funcs + num_vars + 1)
     {
       gomp_mutex_unlock (&devicep->lock);
       if (is_register_lock)
 	gomp_mutex_unlock (&register_lock);
       gomp_fatal ("Cannot map target functions or variables"
-		  " (expected %u + %u + 1, have %u)", num_funcs, num_vars,
+		  " (expected %u, have %u)", num_funcs + num_vars,
 		  num_target_entries);
     }
 
@@ -2768,49 +2340,50 @@ gomp_load_image_to_device (struct gomp_device_descr *devicep, unsigned version,
       array->right = NULL;
       splay_tree_insert (&devicep->mem_map, array);
       array++;
-
-      if (is_link_var
-	  && (omp_requires_mask
-	      & (GOMP_REQUIRES_UNIFIED_SHARED_MEMORY | GOMP_REQUIRES_SELF_MAPS)))
-	gomp_copy_host2dev (devicep, NULL, (void *) target_var->start,
-			    &k->host_start, sizeof (void *), false, NULL);
     }
 
-  /* Last entry is for the ICV struct variable; if absent, start = end = 0.  */
-  struct addr_pair *icv_var = &target_table[num_funcs + num_vars];
-  if (icv_var->start != 0)
+  /* Last entry is for a ICVs variable.
+     Tolerate case where plugin does not return those entries.  */
+  if (num_funcs + num_vars < num_target_entries)
     {
-      /* The index of the devicep within devices[] is regarded as its
-	 'device number', which is different from the per-device type
-	 devicep->target_id.  */
-      int dev_num = (int) (devicep - &devices[0]);
-      struct gomp_offload_icvs *icvs = get_gomp_offload_icvs (dev_num);
-      size_t var_size = icv_var->end - icv_var->start;
-      if (var_size != sizeof (struct gomp_offload_icvs))
+      struct addr_pair *var = &target_table[num_funcs + num_vars];
+
+      /* Start address will be non-zero for the ICVs variable if
+	 the variable was found in this image.  */
+      if (var->start != 0)
 	{
-	  gomp_mutex_unlock (&devicep->lock);
-	  if (is_register_lock)
-	    gomp_mutex_unlock (&register_lock);
-	  gomp_fatal ("offload plugin managed 'icv struct' not of expected "
-		      "format");
-	}
-      /* Copy the ICVs variable to place on device memory, hereby
+	  /* The index of the devicep within devices[] is regarded as its
+	     'device number', which is different from the per-device type
+	     devicep->target_id.  */
+	  int dev_num = (int) (devicep - &devices[0]);
+	  struct gomp_offload_icvs *icvs = get_gomp_offload_icvs (dev_num);
+	  size_t var_size = var->end - var->start;
+	  if (var_size != sizeof (struct gomp_offload_icvs))
+	    {
+	      gomp_mutex_unlock (&devicep->lock);
+	      if (is_register_lock)
+		gomp_mutex_unlock (&register_lock);
+	      gomp_fatal ("offload plugin managed 'icv struct' not of expected "
+			  "format");
+	    }
+	  /* Copy the ICVs variable to place on device memory, hereby
 	     actually designating its device number into effect.  */
-      gomp_copy_host2dev (devicep, NULL, (void *) icv_var->start, icvs,
-			  var_size, false, NULL);
-      splay_tree_key k = &array->key;
-      k->host_start = (uintptr_t) icvs;
-      k->host_end =
-      k->host_start + (size_mask & sizeof (struct gomp_offload_icvs));
-      k->tgt = tgt;
-      k->tgt_offset = icv_var->start;
-      k->refcount = REFCOUNT_INFINITY;
-      k->dynamic_refcount = 0;
-      k->aux = NULL;
-      array->left = NULL;
-      array->right = NULL;
-      splay_tree_insert (&devicep->mem_map, array);
-      array++;
+	  gomp_copy_host2dev (devicep, NULL, (void *) var->start, icvs,
+			      var_size, false, NULL);
+	  splay_tree_key k = &array->key;
+	  k->host_start = (uintptr_t) icvs;
+	  k->host_end =
+	    k->host_start + (size_mask & sizeof (struct gomp_offload_icvs));
+	  k->tgt = tgt;
+	  k->tgt_offset = var->start;
+	  k->refcount = REFCOUNT_INFINITY;
+	  k->dynamic_refcount = 0;
+	  k->aux = NULL;
+	  array->left = NULL;
+	  array->right = NULL;
+	  splay_tree_insert (&devicep->mem_map, array);
+	  array++;
+	}
     }
 
   free (target_table);
@@ -2898,10 +2471,6 @@ gomp_unload_image_from_device (struct gomp_device_descr *devicep,
     }
 }
 
-#define GOMP_REQUIRES_NAME_BUF_LEN \
-  sizeof ("unified_address, unified_shared_memory, " \
-	  "self_maps, reverse_offload")
-
 static void
 gomp_requires_to_name (char *buf, size_t size, int requires_mask)
 {
@@ -2910,9 +2479,6 @@ gomp_requires_to_name (char *buf, size_t size, int requires_mask)
     p += snprintf (p, end - p, "unified_address");
   if (requires_mask & GOMP_REQUIRES_UNIFIED_SHARED_MEMORY)
     p += snprintf (p, end - p, "%sunified_shared_memory",
-		   (p == buf ? "" : ", "));
-  if (requires_mask & GOMP_REQUIRES_SELF_MAPS)
-    p += snprintf (p, end - p, "%sself_maps",
 		   (p == buf ? "" : ", "));
   if (requires_mask & GOMP_REQUIRES_REVERSE_OFFLOAD)
     p += snprintf (p, end - p, "%sreverse_offload",
@@ -2950,8 +2516,10 @@ GOMP_offload_register_ver (unsigned version, const void *host_table,
 
   if (omp_req && omp_requires_mask && omp_requires_mask != omp_req)
     {
-      char buf1[GOMP_REQUIRES_NAME_BUF_LEN];
-      char buf2[GOMP_REQUIRES_NAME_BUF_LEN];
+      char buf1[sizeof ("unified_address, unified_shared_memory, "
+			"reverse_offload")];
+      char buf2[sizeof ("unified_address, unified_shared_memory, "
+			"reverse_offload")];
       gomp_requires_to_name (buf2, sizeof (buf2),
 			     omp_req != GOMP_REQUIRES_TARGET_USED
 			     ? omp_req : omp_requires_mask);
@@ -3105,7 +2673,7 @@ gomp_unload_device (struct gomp_device_descr *devicep)
   if (devicep->state == GOMP_DEVICE_INITIALIZED)
     {
       unsigned i;
-
+      
       /* Unload from device all images registered at the moment.  */
       for (i = 0; i < num_offload_images; i++)
 	{
@@ -3264,14 +2832,12 @@ GOMP_target (int device, void (*fn) (void *), const void *unused,
       || !(fn_addr = gomp_get_target_fn_addr (devicep, fn)))
     return gomp_target_fallback (fn, hostaddrs, devicep, NULL);
 
-  struct gomp_offload_session *session
-    = gomp_offload_session_new (devicep, gomp_alloca);
-
   htab_t refcount_set = htab_create (mapnum);
   struct target_mem_desc *tgt_vars
     = gomp_map_vars (devicep, mapnum, hostaddrs, NULL, sizes, kinds, false,
-		     &refcount_set, GOMP_MAP_VARS_TARGET, session);
-  devicep->run_func (session, fn_addr, NULL);
+		     &refcount_set, GOMP_MAP_VARS_TARGET);
+  devicep->run_func (devicep->target_id, fn_addr, (void *) tgt_vars->tgt_start,
+		     NULL);
   htab_clear (refcount_set);
   gomp_unmap_vars (tgt_vars, true, &refcount_set);
   htab_free (refcount_set);
@@ -3294,25 +2860,8 @@ gomp_copy_back_icvs (struct gomp_device_descr *devicep, int device)
   if (item == NULL)
     return;
 
-  gomp_mutex_lock (&devicep->lock);
-
-  struct splay_tree_s *mem_map = &devicep->mem_map;
-  struct splay_tree_key_s cur_node;
-  void *dev_ptr = NULL;
-
   void *host_ptr = &item->icvs;
-  cur_node.host_start = (uintptr_t) host_ptr;
-  cur_node.host_end = cur_node.host_start;
-  splay_tree_key n = gomp_map_0len_lookup (mem_map, &cur_node);
-
-  if (n)
-    {
-      uintptr_t offset = cur_node.host_start - n->host_start;
-      dev_ptr = (void *) (n->tgt->tgt_start + n->tgt_offset + offset);
-    }
-
-  gomp_mutex_unlock (&devicep->lock);
-
+  void *dev_ptr = omp_get_mapped_ptr (host_ptr, device);
   if (dev_ptr != NULL)
     gomp_copy_dev2host (devicep, NULL, host_ptr, dev_ptr,
 			sizeof (struct gomp_offload_icvs));
@@ -3594,9 +3143,6 @@ GOMP_target_ext (int device, void (*fn) (void *), size_t mapnum,
   struct target_mem_desc *tgt_vars;
   htab_t refcount_set = NULL;
 
-  struct gomp_offload_session *session
-    = gomp_offload_session_new (devicep, gomp_alloca);
-
   if (devicep->capabilities & GOMP_OFFLOAD_CAP_SHARED_MEM)
     {
       if (!fpc_done)
@@ -3611,16 +3157,16 @@ GOMP_target_ext (int device, void (*fn) (void *), size_t mapnum,
 	    }
 	}
       tgt_vars = NULL;
-      devicep->session.set_tvt_func (session, hostaddrs);
     }
   else
     {
       refcount_set = htab_create (mapnum);
       tgt_vars = gomp_map_vars (devicep, mapnum, hostaddrs, NULL, sizes, kinds,
-				true, &refcount_set, GOMP_MAP_VARS_TARGET,
-				session);
+				true, &refcount_set, GOMP_MAP_VARS_TARGET);
     }
-  devicep->run_func (session, fn_addr, new_args);
+  devicep->run_func (devicep->target_id, fn_addr,
+		     tgt_vars ? (void *) tgt_vars->tgt_start : hostaddrs,
+		     new_args);
   if (tgt_vars)
     {
       htab_clear (refcount_set);
@@ -3639,7 +3185,7 @@ GOMP_target_ext (int device, void (*fn) (void *), size_t mapnum,
 
 /* Reverse lookup (device addr -> host addr) for reverse offload.  We avoid
    keeping track of all variable handling - assuming that reverse offload occurs
-   only very rarely.  Downside is that the reverse search is slow.  */
+   ony very rarely.  Downside is that the reverse search is slow.  */
 
 struct gomp_splay_tree_rev_lookup_data {
   uintptr_t tgt_start;
@@ -3771,7 +3317,9 @@ gomp_map_cdata_lookup (struct cpy_data *d, uint64_t *devaddrs,
 void
 gomp_target_rev (uint64_t fn_ptr, uint64_t mapnum, uint64_t devaddrs_ptr,
 		 uint64_t sizes_ptr, uint64_t kinds_ptr, int dev_num,
-		 struct goacc_asyncqueue *aq)
+		 void (*dev_to_host_cpy) (void *, const void *, size_t, void*),
+		 void (*host_to_dev_cpy) (void *, const void *, size_t, void*),
+		 void *token)
 {
   /* Return early if there is no offload code.  */
   if (sizeof (OFFLOAD_PLUGINS) == sizeof (""))
@@ -3800,7 +3348,7 @@ gomp_target_rev (uint64_t fn_ptr, uint64_t mapnum, uint64_t devaddrs_ptr,
 
   if (n == NULL)
     gomp_fatal ("Cannot find reverse-offload function");
-  void (*host_fn) (void *) = (void (*) (void *)) n->k->host_start;
+  void (*host_fn)() = (void (*)()) n->k->host_start;
 
   if ((devicep->capabilities & GOMP_OFFLOAD_CAP_SHARED_MEM) || mapnum == 0)
     {
@@ -3813,17 +3361,26 @@ gomp_target_rev (uint64_t fn_ptr, uint64_t mapnum, uint64_t devaddrs_ptr,
       devaddrs = (uint64_t *) gomp_malloc (mapnum * sizeof (uint64_t));
       sizes = (uint64_t *) gomp_malloc (mapnum * sizeof (uint64_t));
       kinds = (unsigned short *) gomp_malloc (mapnum * sizeof (unsigned short));
-      gomp_copy_dev2host (devicep, aq, devaddrs,
-			  (const void *) (uintptr_t) devaddrs_ptr,
-			  mapnum * sizeof (uint64_t));
-      gomp_copy_dev2host (devicep, aq, sizes,
-			  (const void *) (uintptr_t) sizes_ptr,
-			  mapnum * sizeof (uint64_t));
-      gomp_copy_dev2host (devicep, aq, kinds,
-			  (const void *) (uintptr_t) kinds_ptr,
-			  mapnum * sizeof (unsigned short));
-      if (aq && !devicep->openacc.async.synchronize_func (aq))
-	exit (EXIT_FAILURE);
+      if (dev_to_host_cpy)
+	{
+	  dev_to_host_cpy (devaddrs, (const void *) (uintptr_t) devaddrs_ptr,
+			   mapnum * sizeof (uint64_t), token);
+	  dev_to_host_cpy (sizes, (const void *) (uintptr_t) sizes_ptr,
+			   mapnum * sizeof (uint64_t), token);
+	  dev_to_host_cpy (kinds, (const void *) (uintptr_t) kinds_ptr,
+			   mapnum * sizeof (unsigned short), token);
+	}
+      else
+	{
+	  gomp_copy_dev2host (devicep, NULL, devaddrs,
+			      (const void *) (uintptr_t) devaddrs_ptr,
+			      mapnum * sizeof (uint64_t));
+	  gomp_copy_dev2host (devicep, NULL, sizes,
+			      (const void *) (uintptr_t) sizes_ptr,
+			      mapnum * sizeof (uint64_t));
+	  gomp_copy_dev2host (devicep, NULL, kinds, (const void *) (uintptr_t) kinds_ptr,
+			      mapnum * sizeof (unsigned short));
+	}
     }
 
   size_t tgt_align = 0, tgt_size = 0;
@@ -3850,14 +3407,13 @@ gomp_target_rev (uint64_t fn_ptr, uint64_t mapnum, uint64_t devaddrs_ptr,
 	    if (devicep->capabilities & GOMP_OFFLOAD_CAP_SHARED_MEM)
 	      memcpy (tgt + tgt_size, (void *) (uintptr_t) devaddrs[i],
 		      (size_t) sizes[i]);
+	    else if (dev_to_host_cpy)
+	      dev_to_host_cpy (tgt + tgt_size, (void *) (uintptr_t) devaddrs[i],
+			       (size_t) sizes[i], token);
 	    else
-	      {
-		gomp_copy_dev2host (devicep, aq, tgt + tgt_size,
-				    (void *) (uintptr_t) devaddrs[i],
-				    (size_t) sizes[i]);
-		if (aq && !devicep->openacc.async.synchronize_func (aq))
-		  exit (EXIT_FAILURE);
-	      }
+	      gomp_copy_dev2host (devicep, NULL, tgt + tgt_size,
+				  (void *) (uintptr_t) devaddrs[i],
+				  (size_t) sizes[i]);
 	    devaddrs[i] = (uint64_t) (uintptr_t) tgt + tgt_size;
 	    tgt_size = tgt_size + sizes[i];
 	    if ((devicep->capabilities & GOMP_OFFLOAD_CAP_SHARED_MEM)
@@ -3894,8 +3450,7 @@ gomp_target_rev (uint64_t fn_ptr, uint64_t mapnum, uint64_t devaddrs_ptr,
 	      case GOMP_MAP_DELETE:
 	      case GOMP_MAP_RELEASE:
 	      case GOMP_MAP_DELETE_ZERO_LEN_ARRAY_SECTION:
-		/* Assume it is present; look it up - but ignore unless the
-		   present clause is there. */
+		/* Assume it is present; look it up - but ignore otherwise. */
 	      case GOMP_MAP_ALLOC:
 	      case GOMP_MAP_FROM:
 	      case GOMP_MAP_FORCE_ALLOC:
@@ -3907,10 +3462,6 @@ gomp_target_rev (uint64_t fn_ptr, uint64_t mapnum, uint64_t devaddrs_ptr,
 	      case GOMP_MAP_FORCE_TOFROM:
 	      case GOMP_MAP_ALWAYS_TO:
 	      case GOMP_MAP_ALWAYS_TOFROM:
-	      case GOMP_MAP_FORCE_PRESENT:
-	      case GOMP_MAP_ALWAYS_PRESENT_FROM:
-	      case GOMP_MAP_ALWAYS_PRESENT_TO:
-	      case GOMP_MAP_ALWAYS_PRESENT_TOFROM:
 	      case GOMP_MAP_ZERO_LEN_ARRAY_SECTION:
 		cdata[i].devaddr = devaddrs[i];
 		bool zero_len = (kind == GOMP_MAP_DELETE_ZERO_LEN_ARRAY_SECTION
@@ -3931,23 +3482,7 @@ gomp_target_rev (uint64_t fn_ptr, uint64_t mapnum, uint64_t devaddrs_ptr,
 					      devaddrs[i] + sizes[i], zero_len);
 		    cdata[i].present = n2 != NULL;
 		  }
-		if (!cdata[i].present && GOMP_MAP_PRESENT_P (kind))
-		  {
-		    gomp_mutex_unlock (&devicep->lock);
-#ifdef HAVE_INTTYPES_H
-		    gomp_fatal ("present clause: no corresponding data on "
-				"parent device at %p with size %"PRIu64,
-				(void *) (uintptr_t) devaddrs[i],
-				(uint64_t) sizes[i]);
-#else
-		    gomp_fatal ("present clause: no corresponding data on "
-				"parent device at %p with size %lu",
-				(void *) (uintptr_t) devaddrs[i],
-				(unsigned long) sizes[i]);
-#endif
-		    break;
-		  }
-		else if (!cdata[i].present
+		if (!cdata[i].present
 		    && kind != GOMP_MAP_DELETE
 		    && kind != GOMP_MAP_RELEASE
 		    && kind != GOMP_MAP_DELETE_ZERO_LEN_ARRAY_SECTION)
@@ -3965,17 +3500,18 @@ gomp_target_rev (uint64_t fn_ptr, uint64_t mapnum, uint64_t devaddrs_ptr,
 		     && (kind == GOMP_MAP_TO || kind == GOMP_MAP_TOFROM))
 		    || kind == GOMP_MAP_FORCE_TO
 		    || kind == GOMP_MAP_FORCE_TOFROM
-		    || GOMP_MAP_ALWAYS_TO_P (kind))
+		    || kind == GOMP_MAP_ALWAYS_TO
+		    || kind == GOMP_MAP_ALWAYS_TOFROM)
 		  {
-		    gomp_copy_dev2host (devicep, aq,
-					(void *) (uintptr_t) devaddrs[i],
-					(void *) (uintptr_t) cdata[i].devaddr,
-					sizes[i]);
-		    if (aq && !devicep->openacc.async.synchronize_func (aq))
-		      {
-			gomp_mutex_unlock (&devicep->lock);
-			exit (EXIT_FAILURE);
-		      }
+		    if (dev_to_host_cpy)
+		      dev_to_host_cpy ((void *) (uintptr_t) devaddrs[i],
+				       (void *) (uintptr_t) cdata[i].devaddr,
+				       sizes[i], token);
+		    else
+		      gomp_copy_dev2host (devicep, NULL,
+					  (void *) (uintptr_t) devaddrs[i],
+					  (void *) (uintptr_t) cdata[i].devaddr,
+					  sizes[i]);
 		  }
 		if (struct_cpy)
 		  struct_cpy--;
@@ -4042,15 +3578,15 @@ gomp_target_rev (uint64_t fn_ptr, uint64_t mapnum, uint64_t devaddrs_ptr,
 		    devaddrs[i]
 		      = (uint64_t) (uintptr_t) gomp_aligned_alloc (align,
 								   sizes[i]);
-		    gomp_copy_dev2host (devicep, aq,
-					(void *) (uintptr_t) devaddrs[i],
-					(void *) (uintptr_t) cdata[i].devaddr,
-					sizes[i]);
-		    if (aq && !devicep->openacc.async.synchronize_func (aq))
-		      {
-			gomp_mutex_unlock (&devicep->lock);
-			exit (EXIT_FAILURE);
-		      }
+		    if (dev_to_host_cpy)
+		      dev_to_host_cpy ((void *) (uintptr_t) devaddrs[i],
+				       (void *) (uintptr_t) cdata[i].devaddr,
+				       sizes[i], token);
+		    else
+		      gomp_copy_dev2host (devicep, NULL,
+					  (void *) (uintptr_t) devaddrs[i],
+					  (void *) (uintptr_t) cdata[i].devaddr,
+					  sizes[i]);
 		  }
 		for (j = i + 1; j < mapnum; j++)
 		  {
@@ -4150,21 +3686,19 @@ gomp_target_rev (uint64_t fn_ptr, uint64_t mapnum, uint64_t devaddrs_ptr,
 	      case GOMP_MAP_FORCE_TOFROM:
 	      case GOMP_MAP_ALWAYS_FROM:
 	      case GOMP_MAP_ALWAYS_TOFROM:
-	      case GOMP_MAP_ALWAYS_PRESENT_FROM:
-	      case GOMP_MAP_ALWAYS_PRESENT_TOFROM:
 		copy = true;
 		/* FALLTHRU */
 	      case GOMP_MAP_FROM:
 	      case GOMP_MAP_TOFROM:
-		if (copy)
-		  {
-		    gomp_copy_host2dev (devicep, aq,
-					(void *) (uintptr_t) cdata[i].devaddr,
-					(void *) (uintptr_t) devaddrs[i],
-					sizes[i], false, NULL);
-		    if (aq && !devicep->openacc.async.synchronize_func (aq))
-		      exit (EXIT_FAILURE);
-		  }
+		if (copy && host_to_dev_cpy)
+		  host_to_dev_cpy ((void *) (uintptr_t) cdata[i].devaddr,
+				   (void *) (uintptr_t) devaddrs[i],
+				   sizes[i], token);
+		else if (copy)
+		  gomp_copy_host2dev (devicep, NULL,
+				      (void *) (uintptr_t) cdata[i].devaddr,
+				      (void *) (uintptr_t) devaddrs[i],
+				      sizes[i], false, NULL);
 	      default:
 		break;
 	    }
@@ -4219,7 +3753,7 @@ gomp_target_data_fallback (struct gomp_device_descr *devicep)
          would get out of sync.  */
       struct target_mem_desc *tgt
 	= gomp_map_vars (NULL, 0, NULL, NULL, NULL, NULL, false,
-			 NULL, GOMP_MAP_VARS_DATA, NULL);
+			 NULL, GOMP_MAP_VARS_DATA);
       tgt->prev = icv->target_data;
       icv->target_data = tgt;
     }
@@ -4238,7 +3772,7 @@ GOMP_target_data (int device, const void *unused, size_t mapnum,
 
   struct target_mem_desc *tgt
     = gomp_map_vars (devicep, mapnum, hostaddrs, NULL, sizes, kinds, false,
-		     NULL, GOMP_MAP_VARS_DATA, NULL);
+		     NULL, GOMP_MAP_VARS_DATA);
   struct gomp_task_icv *icv = gomp_icv (true);
   tgt->prev = icv->target_data;
   icv->target_data = tgt;
@@ -4257,7 +3791,7 @@ GOMP_target_data_ext (int device, size_t mapnum, void **hostaddrs,
 
   struct target_mem_desc *tgt
     = gomp_map_vars (devicep, mapnum, hostaddrs, NULL, sizes, kinds, true,
-		     NULL, GOMP_MAP_VARS_DATA, NULL);
+		     NULL, GOMP_MAP_VARS_DATA);
   struct gomp_task_icv *icv = gomp_icv (true);
   tgt->prev = icv->target_data;
   icv->target_data = tgt;
@@ -4381,10 +3915,6 @@ gomp_exit_data (struct gomp_device_descr *devicep, size_t mapnum,
       gomp_mutex_unlock (&devicep->lock);
       return;
     }
-  size_t *iterator_count = NULL;
-  bool iterators_p = false;
-  iterators_p = gomp_merge_iterator_maps (&mapnum, &hostaddrs, &sizes,
-					  (void**) &kinds, &iterator_count);
 
   for (i = 0; i < mapnum; i++)
     if ((kinds[i] & typemask) == GOMP_MAP_DETACH)
@@ -4484,14 +4014,6 @@ gomp_exit_data (struct gomp_device_descr *devicep, size_t mapnum,
     gomp_remove_var (devicep, remove_vars[i]);
 
   gomp_mutex_unlock (&devicep->lock);
-
-  if (iterators_p)
-    {
-      free (hostaddrs);
-      free (sizes);
-      free (kinds);
-      free (iterator_count);
-    }
 }
 
 void
@@ -4577,12 +4099,11 @@ GOMP_target_enter_exit_data (int device, size_t mapnum, void **hostaddrs,
   size_t i, j;
   if ((flags & GOMP_TARGET_FLAG_EXIT_DATA) == 0)
     for (i = 0; i < mapnum; i++)
-      if ((kinds[i] & 0xff) == GOMP_MAP_STRUCT
-	  || (kinds[i] & 0xff) == GOMP_MAP_STRUCT_UNORD)
+      if ((kinds[i] & 0xff) == GOMP_MAP_STRUCT)
 	{
 	  gomp_map_vars (devicep, sizes[i] + 1, &hostaddrs[i], NULL, &sizes[i],
 			 &kinds[i], true, &refcount_set,
-			 GOMP_MAP_VARS_ENTER_DATA, NULL);
+			 GOMP_MAP_VARS_ENTER_DATA);
 	  i += sizes[i];
 	}
       else if ((kinds[i] & 0xff) == GOMP_MAP_TO_PSET)
@@ -4593,7 +4114,7 @@ GOMP_target_enter_exit_data (int device, size_t mapnum, void **hostaddrs,
 	      break;
 	  gomp_map_vars (devicep, j-i, &hostaddrs[i], NULL, &sizes[i],
 			 &kinds[i], true, &refcount_set,
-			 GOMP_MAP_VARS_ENTER_DATA, NULL);
+			 GOMP_MAP_VARS_ENTER_DATA);
 	  i += j - i - 1;
 	}
       else if (i + 1 < mapnum
@@ -4604,12 +4125,12 @@ GOMP_target_enter_exit_data (int device, size_t mapnum, void **hostaddrs,
 	  /* An attach operation must be processed together with the mapped
 	     base-pointer list item.  */
 	  gomp_map_vars (devicep, 2, &hostaddrs[i], NULL, &sizes[i], &kinds[i],
-			 true, &refcount_set, GOMP_MAP_VARS_ENTER_DATA, NULL);
+			 true, &refcount_set, GOMP_MAP_VARS_ENTER_DATA);
 	  i += 1;
 	}
       else
 	gomp_map_vars (devicep, 1, &hostaddrs[i], NULL, &sizes[i], &kinds[i],
-		       true, &refcount_set, GOMP_MAP_VARS_ENTER_DATA, NULL);
+		       true, &refcount_set, GOMP_MAP_VARS_ENTER_DATA);
   else
     gomp_exit_data (devicep, mapnum, hostaddrs, sizes, kinds, &refcount_set);
   htab_free (refcount_set);
@@ -4642,23 +4163,24 @@ gomp_target_task_fn (void *data)
 	  return false;
 	}
 
-      struct gomp_offload_session *session = ttask->offload_session;
-      devicep->session.start_func (session, devicep->target_id);
-
+      void *actual_arguments;
       if (devicep->capabilities & GOMP_OFFLOAD_CAP_SHARED_MEM)
 	{
 	  ttask->tgt = NULL;
-	  devicep->session.set_tvt_func (session, ttask->hostaddrs);
+	  actual_arguments = ttask->hostaddrs;
 	}
       else
-	ttask->tgt = gomp_map_vars (devicep, ttask->mapnum, ttask->hostaddrs,
-				    NULL, ttask->sizes, ttask->kinds, true,
-				    NULL, GOMP_MAP_VARS_TARGET,
-				    session);
+	{
+	  ttask->tgt = gomp_map_vars (devicep, ttask->mapnum, ttask->hostaddrs,
+				      NULL, ttask->sizes, ttask->kinds, true,
+				      NULL, GOMP_MAP_VARS_TARGET);
+	  actual_arguments = (void *) ttask->tgt->tgt_start;
+	}
       ttask->state = GOMP_TARGET_TASK_READY_TO_RUN;
 
       assert (devicep->async_run_func);
-      devicep->async_run_func (session, fn_addr, ttask->args, (void *) ttask);
+      devicep->async_run_func (devicep->target_id, fn_addr, actual_arguments,
+			       ttask->args, (void *) ttask);
       return true;
     }
   else if (devicep == NULL
@@ -4675,18 +4197,17 @@ gomp_target_task_fn (void *data)
       htab_t refcount_set = htab_create (ttask->mapnum);
       if ((ttask->flags & GOMP_TARGET_FLAG_EXIT_DATA) == 0)
 	for (i = 0; i < ttask->mapnum; i++)
-	  if ((ttask->kinds[i] & 0xff) == GOMP_MAP_STRUCT
-	      || (ttask->kinds[i] & 0xff) == GOMP_MAP_STRUCT_UNORD)
+	  if ((ttask->kinds[i] & 0xff) == GOMP_MAP_STRUCT)
 	    {
 	      gomp_map_vars (devicep, ttask->sizes[i] + 1, &ttask->hostaddrs[i],
 			     NULL, &ttask->sizes[i], &ttask->kinds[i], true,
-			     &refcount_set, GOMP_MAP_VARS_ENTER_DATA, NULL);
+			     &refcount_set, GOMP_MAP_VARS_ENTER_DATA);
 	      i += ttask->sizes[i];
 	    }
 	  else
 	    gomp_map_vars (devicep, 1, &ttask->hostaddrs[i], NULL, &ttask->sizes[i],
 			   &ttask->kinds[i], true, &refcount_set,
-			   GOMP_MAP_VARS_ENTER_DATA, NULL);
+			   GOMP_MAP_VARS_ENTER_DATA);
       else
 	gomp_exit_data (devicep, ttask->mapnum, ttask->hostaddrs, ttask->sizes,
 			ttask->kinds, &refcount_set);
@@ -4694,8 +4215,6 @@ gomp_target_task_fn (void *data)
     }
   return false;
 }
-
-/* Implement OpenMP 'teams' construct, legacy entry point.  */
 
 void
 GOMP_teams (unsigned int num_teams, unsigned int thread_limit)
@@ -4708,13 +4227,6 @@ GOMP_teams (unsigned int num_teams, unsigned int thread_limit)
     }
   (void) num_teams;
 }
-
-/* Implement OpenMP 'teams' construct.
-
-   Initialize upon FIRST call.  Return whether this invocation is active.
-   Depending on whether NUM_TEAMS_LOW asks for more teams than are provided
-   in hardware, we may need to loop multiple times; in that case make sure to
-   update the team-level variable used by 'omp_get_team_num'.  */
 
 bool
 GOMP_teams4 (unsigned int num_teams_low, unsigned int num_teams_high,
@@ -4745,9 +4257,6 @@ GOMP_teams4 (unsigned int num_teams_low, unsigned int num_teams_high,
 void *
 omp_target_alloc (size_t size, int device_num)
 {
-  if (device_num == omp_default_device)
-    device_num = gomp_get_default_device ();
-
   if (device_num == omp_initial_device
       || device_num == gomp_get_num_devices ())
     return malloc (size);
@@ -4769,9 +4278,6 @@ omp_target_alloc (size_t size, int device_num)
 void
 omp_target_free (void *device_ptr, int device_num)
 {
-  if (device_num == omp_default_device)
-    device_num = gomp_get_default_device ();
-
   if (device_num == omp_initial_device
       || device_num == gomp_get_num_devices ())
     {
@@ -4795,178 +4301,9 @@ omp_target_free (void *device_ptr, int device_num)
   gomp_mutex_unlock (&devicep->lock);
 }
 
-void *
-gomp_managed_alloc (size_t size)
-{
-  struct gomp_task_icv *icv = gomp_icv (false);
-  struct gomp_device_descr *devicep = resolve_device (icv->default_device_var,
-						      false);
-  if (devicep == NULL)
-    return NULL;
-
-  void *ret = NULL;
-  gomp_mutex_lock (&devicep->lock);
-  if (devicep->managed_alloc_func)
-    ret = devicep->managed_alloc_func (devicep->target_id, size);
-  gomp_mutex_unlock (&devicep->lock);
-  return ret;
-}
-
-void
-gomp_managed_free (void *device_ptr)
-{
-  if (device_ptr == NULL)
-    return;
-
-  struct gomp_task_icv *icv = gomp_icv (false);
-  struct gomp_device_descr *devicep = resolve_device (icv->default_device_var,
-						      false);
-  if (devicep == NULL)
-    gomp_fatal ("attempted to free managed memory at %p, but the default "
-		"device is set to the host device", device_ptr);
-
-  gomp_mutex_lock (&devicep->lock);
-  if (!devicep->managed_free_func
-      || !devicep->managed_free_func (devicep->target_id, device_ptr))
-    {
-      gomp_mutex_unlock (&devicep->lock);
-      gomp_fatal ("error in freeing managed memory block at %p", device_ptr);
-    }
-  gomp_mutex_unlock (&devicep->lock);
-}
-
-/* Device (really: libgomp plugin) to use for paged-locked memory.  We
-   assume there is either none or exactly one such device for the lifetime of
-   the process.  */
-
-static struct gomp_device_descr *device_for_page_locked
-  = /* uninitialized */ (void *) -1;
-
-static struct gomp_device_descr *
-get_device_for_page_locked (void)
-{
-  struct gomp_device_descr *device;
-#ifdef HAVE_SYNC_BUILTINS
-  device
-    = __atomic_load_n (&device_for_page_locked, MEMMODEL_RELAXED);
-  if (device == (void *) -1)
-    {
-      gomp_init_targets_once ();
-
-      device = NULL;
-      for (int i = 0; i < num_devices; ++i)
-	{
-	  /* We consider only the first device of potentially several of the
-	     same type as this functionality is not specific to an individual
-	     offloading device, but instead relates to the host-side
-	     implementation of the respective offloading implementation.  */
-	  if (devices[i].target_id != 0)
-	    continue;
-
-	  if (!devices[i].page_locked_host_alloc_func)
-	    continue;
-
-	  if (device)
-	    gomp_fatal ("Unclear how %s and %s libgomp plugins may"
-			" simultaneously provide functionality"
-			" for page-locked memory",
-			device->name, devices[i].name);
-
-	  device = &devices[i];
-	  gomp_debug (0, "Using device %s for page-locked memory\n",
-		      device->name);
-	}
-
-      struct gomp_device_descr *device_old
-	= __atomic_exchange_n (&device_for_page_locked, device,
-			       MEMMODEL_RELAXED);
-      assert (device_old == (void *) -1
-	      /* We shouldn't have concurrently found a different or no
-		 device.  */
-	      || device_old == device);
-    }
-#else /* !HAVE_SYNC_BUILTINS */
-  (void) &device_for_page_locked;
-  device = NULL;
-#endif /* HAVE_SYNC_BUILTINS */
-
-  return device;
-}
-
-/* Allocate page-locked host memory.
-   Returns whether we have a device capable of that.  */
-
-attribute_hidden bool
-gomp_page_locked_host_alloc (void **ptr, size_t size)
-{
-  struct gomp_device_descr *device = get_device_for_page_locked ();
-  if (device)
-    {
-      gomp_mutex_lock (&device->lock);
-      if (device->state == GOMP_DEVICE_UNINITIALIZED)
-	gomp_init_device (device);
-      else if (device->state == GOMP_DEVICE_FINALIZED)
-	{
-	  gomp_mutex_unlock (&device->lock);
-	  gomp_fatal ("Device %s used for page-locked memory is finalized",
-		      device->name);
-	}
-      gomp_mutex_unlock (&device->lock);
-
-      if (!device->page_locked_host_alloc_func (ptr, size))
-	gomp_fatal ("Failed to allocate page-locked host memory"
-		    " via %s libgomp plugin",
-		    device->name);
-    }
-  return device != NULL;
-}
-
-/* Free page-locked host memory.
-   This must only be called if 'gomp_page_locked_host_alloc' returned
-   'true'.  */
-
-attribute_hidden void
-gomp_page_locked_host_free (void *ptr)
-{
-  struct gomp_device_descr *device = get_device_for_page_locked ();
-  assert (device);
-
-  gomp_mutex_lock (&device->lock);
-  assert (device->state != GOMP_DEVICE_UNINITIALIZED);
-  if (device->state == GOMP_DEVICE_FINALIZED)
-    {
-      gomp_mutex_unlock (&device->lock);
-      return;
-    }
-  gomp_mutex_unlock (&device->lock);
-
-  if (!device->page_locked_host_free_func (ptr))
-    gomp_fatal ("Failed to free page-locked host memory"
-		" via %s libgomp plugin",
-		device->name);
-}
-
-/* Check whether corresponding storage exists on the device.
-   - NULL pointer or invalid device: return 0
-   - host device: return 1
-   - Has corresponding storage: return 1
-   - Otherwise: return 0
-
-   Note that for GOMP_OFFLOAD_CAP_SHARED_MEM self mapping is used and
-   omp_target_associate_ptr is disabled; the only corresponding storage
-   exists then for declare_target with other clauses than an explicit or
-   implicit 'link' clause.
-   However, the link cause with shared memory does not count as mapped.  */
-
 int
 omp_target_is_present (const void *ptr, int device_num)
 {
-  if (ptr == NULL)
-    return 0;
-
-  if (device_num == omp_default_device)
-    device_num = gomp_get_default_device ();
-
   if (device_num == omp_initial_device
       || device_num == gomp_get_num_devices ())
     return 1;
@@ -4975,8 +4312,13 @@ omp_target_is_present (const void *ptr, int device_num)
   if (devicep == NULL)
     return 0;
 
-  bool is_shared = (!(devicep->capabilities & GOMP_OFFLOAD_CAP_OPENMP_400)
-		    || devicep->capabilities & GOMP_OFFLOAD_CAP_SHARED_MEM);
+  if (ptr == NULL)
+    return 1;
+
+  if (!(devicep->capabilities & GOMP_OFFLOAD_CAP_OPENMP_400)
+      || devicep->capabilities & GOMP_OFFLOAD_CAP_SHARED_MEM)
+    return 1;
+
   gomp_mutex_lock (&devicep->lock);
   struct splay_tree_s *mem_map = &devicep->mem_map;
   struct splay_tree_key_s cur_node;
@@ -4984,7 +4326,7 @@ omp_target_is_present (const void *ptr, int device_num)
   cur_node.host_start = (uintptr_t) ptr;
   cur_node.host_end = cur_node.host_start;
   splay_tree_key n = gomp_map_0len_lookup (mem_map, &cur_node);
-  int ret = n != NULL && (!is_shared || n->refcount != REFCOUNT_LINK);
+  int ret = n != NULL;
   gomp_mutex_unlock (&devicep->lock);
   return ret;
 }
@@ -4994,11 +4336,6 @@ omp_target_memcpy_check (int dst_device_num, int src_device_num,
 			 struct gomp_device_descr **dst_devicep,
 			 struct gomp_device_descr **src_devicep)
 {
-  if (dst_device_num == omp_default_device)
-    dst_device_num = gomp_get_default_device ();
-  if (src_device_num == omp_default_device)
-    src_device_num = gomp_get_default_device ();
-
   if (dst_device_num != gomp_get_num_devices ()
       /* Above gomp_get_num_devices has to be called unconditionally.  */
       && dst_device_num != omp_initial_device)
@@ -5156,8 +4493,7 @@ omp_target_memcpy_rect_worker (void *dst, const void *src, size_t element_size,
 			       const size_t *dst_dimensions,
 			       const size_t *src_dimensions,
 			       struct gomp_device_descr *dst_devicep,
-			       struct gomp_device_descr *src_devicep,
-			       size_t *tmp_size, void **tmp)
+			       struct gomp_device_descr *src_devicep)
 {
   size_t dst_slice = element_size;
   size_t src_slice = element_size;
@@ -5192,88 +4528,14 @@ omp_target_memcpy_rect_worker (void *dst, const void *src, size_t element_size,
 					 (const char *) src + src_off,
 					 length);
       else
-	{
-	  if (*tmp_size == 0)
-	    {
-	      *tmp_size = length;
-	      *tmp = malloc (length);
-	      if (*tmp == NULL)
-		return ENOMEM;
-	    }
-	  else if (*tmp_size < length)
-	    {
-	      *tmp_size = length;
-	      free (*tmp);
-	      *tmp = malloc (length);
-	      if (*tmp == NULL)
-		return ENOMEM;
-	    }
-	  ret = src_devicep->dev2host_func (src_devicep->target_id, *tmp,
-					    (const char *) src + src_off,
-					    length);
-	  if (ret == 1)
-	    ret = dst_devicep->host2dev_func (dst_devicep->target_id,
-					      (char *) dst + dst_off, *tmp,
-					      length);
-	}
+	ret = 0;
       return ret ? 0 : EINVAL;
     }
 
-  /* host->device, device->host and intra device.  */
-  if (num_dims == 2
-      && ((src_devicep
-	   && src_devicep == dst_devicep
-	   && src_devicep->memcpy2d_func)
-	  || (!src_devicep != !dst_devicep
-	      && ((src_devicep && src_devicep->memcpy2d_func)
-		  || (dst_devicep && dst_devicep->memcpy2d_func)))))
-    {
-      size_t vol_sz1, dst_sz1, src_sz1, dst_off_sz1, src_off_sz1;
-      int dst_id = dst_devicep ? dst_devicep->target_id : -1;
-      int src_id = src_devicep ? src_devicep->target_id : -1;
-      struct gomp_device_descr *devp = dst_devicep ? dst_devicep : src_devicep;
-
-      if (__builtin_mul_overflow (volume[1], element_size, &vol_sz1)
-	  || __builtin_mul_overflow (dst_dimensions[1], element_size, &dst_sz1)
-	  || __builtin_mul_overflow (src_dimensions[1], element_size, &src_sz1)
-	  || __builtin_mul_overflow (dst_offsets[1], element_size, &dst_off_sz1)
-	  || __builtin_mul_overflow (src_offsets[1], element_size,
-				     &src_off_sz1))
-	return EINVAL;
-      ret = devp->memcpy2d_func (dst_id, src_id, vol_sz1, volume[0],
-				 dst, dst_off_sz1, dst_offsets[0], dst_sz1,
-				 src, src_off_sz1, src_offsets[0], src_sz1);
-      if (ret != -1)
-	return ret ? 0 : EINVAL;
-    }
-  else if (num_dims == 3
-	   && ((src_devicep
-		&& src_devicep == dst_devicep
-		&& src_devicep->memcpy3d_func)
-	       || (!src_devicep != !dst_devicep
-		   && ((src_devicep && src_devicep->memcpy3d_func)
-		       || (dst_devicep && dst_devicep->memcpy3d_func)))))
-    {
-      size_t vol_sz2, dst_sz2, src_sz2, dst_off_sz2, src_off_sz2;
-      int dst_id = dst_devicep ? dst_devicep->target_id : -1;
-      int src_id = src_devicep ? src_devicep->target_id : -1;
-      struct gomp_device_descr *devp = dst_devicep ? dst_devicep : src_devicep;
-
-      if (__builtin_mul_overflow (volume[2], element_size, &vol_sz2)
-	  || __builtin_mul_overflow (dst_dimensions[2], element_size, &dst_sz2)
-	  || __builtin_mul_overflow (src_dimensions[2], element_size, &src_sz2)
-	  || __builtin_mul_overflow (dst_offsets[2], element_size, &dst_off_sz2)
-	  || __builtin_mul_overflow (src_offsets[2], element_size,
-				     &src_off_sz2))
-	return EINVAL;
-      ret = devp->memcpy3d_func (dst_id, src_id, vol_sz2, volume[1], volume[0],
-				 dst, dst_off_sz2, dst_offsets[1],
-				 dst_offsets[0], dst_sz2, dst_dimensions[1],
-				 src, src_off_sz2, src_offsets[1],
-				 src_offsets[0], src_sz2, src_dimensions[1]);
-      if (ret != -1)
-	return ret ? 0 : EINVAL;
-    }
+  /* FIXME: it would be nice to have some plugin function to handle
+     num_dims == 2 and num_dims == 3 more efficiently.  Larger ones can
+     be handled in the generic recursion below, and for host-host it
+     should be used even for any num_dims >= 2.  */
 
   for (i = 1; i < num_dims; i++)
     if (__builtin_mul_overflow (dst_slice, dst_dimensions[i], &dst_slice)
@@ -5290,7 +4552,7 @@ omp_target_memcpy_rect_worker (void *dst, const void *src, size_t element_size,
 					   volume + 1, dst_offsets + 1,
 					   src_offsets + 1, dst_dimensions + 1,
 					   src_dimensions + 1, dst_devicep,
-					   src_devicep, tmp_size, tmp);
+					   src_devicep);
       if (ret)
 	return ret;
       dst_off += dst_slice;
@@ -5313,6 +4575,9 @@ omp_target_memcpy_rect_check (void *dst, const void *src, int dst_device_num,
   if (ret)
     return ret;
 
+  if (*src_devicep != NULL && *dst_devicep != NULL && *src_devicep != *dst_devicep)
+    return EINVAL;
+
   return 0;
 }
 
@@ -5326,28 +4591,18 @@ omp_target_memcpy_rect_copy (void *dst, const void *src,
 			     struct gomp_device_descr *dst_devicep,
 			     struct gomp_device_descr *src_devicep)
 {
-  size_t tmp_size = 0;
-  void *tmp = NULL;
-  bool lock_src;
-  bool lock_dst;
-
-  lock_src = src_devicep != NULL;
-  lock_dst = dst_devicep != NULL && src_devicep != dst_devicep;
-  if (lock_src)
+  if (src_devicep)
     gomp_mutex_lock (&src_devicep->lock);
-  if (lock_dst)
+  else if (dst_devicep)
     gomp_mutex_lock (&dst_devicep->lock);
   int ret = omp_target_memcpy_rect_worker (dst, src, element_size, num_dims,
 					   volume, dst_offsets, src_offsets,
 					   dst_dimensions, src_dimensions,
-					   dst_devicep, src_devicep,
-					   &tmp_size, &tmp);
-  if (lock_src)
+					   dst_devicep, src_devicep);
+  if (src_devicep)
     gomp_mutex_unlock (&src_devicep->lock);
-  if (lock_dst)
+  else if (dst_devicep)
     gomp_mutex_unlock (&dst_devicep->lock);
-  if (tmp)
-    free (tmp);
 
   return ret;
 }
@@ -5457,101 +4712,10 @@ omp_target_memcpy_rect_async (void *dst, const void *src, size_t element_size,
   return 0;
 }
 
-static void
-omp_target_memset_int (void *ptr, int val, size_t count,
-		       struct gomp_device_descr *devicep)
-{
-  if (__builtin_expect (count == 0, 0))
-    return;
-  if (devicep == NULL)
-    {
-      memset (ptr, val, count);
-      return;
-    }
-
-  gomp_mutex_lock (&devicep->lock);
-  int ret = devicep->memset_func (devicep->target_id, ptr, val, count);
-  gomp_mutex_unlock (&devicep->lock);
-  if (!ret)
-    gomp_fatal ("omp_target_memset failed");
-}
-
-void*
-omp_target_memset (void *ptr, int val, size_t count, int device_num)
-{
-  if (device_num == omp_default_device)
-    device_num = gomp_get_default_device ();
-
-  struct gomp_device_descr *devicep;
-  if (device_num == omp_initial_device
-      || device_num == gomp_get_num_devices ()
-      || (devicep = resolve_device (device_num, false)) == NULL
-      || !(devicep->capabilities & GOMP_OFFLOAD_CAP_OPENMP_400)
-      || devicep->capabilities & GOMP_OFFLOAD_CAP_SHARED_MEM)
-    devicep = NULL;
-
-  omp_target_memset_int (ptr, val, count, devicep);
-  return ptr;
-}
-
-typedef struct
-{
-  void *ptr;
-  size_t count;
-  struct gomp_device_descr *devicep;
-  int val;
-} omp_target_memset_data;
-
-static void
-omp_target_memset_async_helper (void *args)
-{
-  omp_target_memset_data *a = args;
-  omp_target_memset_int (a->ptr, a->val, a->count, a->devicep);
-}
-
-void*
-omp_target_memset_async (void *ptr, int val, size_t count, int device_num,
-			 int depobj_count, omp_depend_t *depobj_list)
-{
-  void *depend[depobj_count + 5];
-  struct gomp_device_descr *devicep;
-  unsigned flags = 0;
-  int i;
-
-  if (device_num == omp_default_device)
-    device_num = gomp_get_default_device ();
-
-  if (device_num == omp_initial_device
-      || device_num == gomp_get_num_devices ()
-      || (devicep = resolve_device (device_num, false)) == NULL
-      || !(devicep->capabilities & GOMP_OFFLOAD_CAP_OPENMP_400)
-      || devicep->capabilities & GOMP_OFFLOAD_CAP_SHARED_MEM)
-    devicep = NULL;
-
-  omp_target_memset_data s = {.ptr = ptr, .val = val, .count = count,
-			      .devicep = devicep};
-  if (depobj_count > 0 && depobj_list != NULL)
-    {
-      flags |= GOMP_TASK_FLAG_DEPEND;
-      depend[0] = 0;
-      depend[1] = (void *) (uintptr_t) depobj_count;
-      depend[2] = depend[3] = depend[4] = 0;
-      for (i = 0; i < depobj_count; ++i)
-	depend[i + 5] = &depobj_list[i];
-    }
-
-  GOMP_task (omp_target_memset_async_helper, &s, NULL, sizeof (s),
-	     __alignof__ (s), true, flags, depend, 0, NULL);
-  return ptr;
-}
-
 int
 omp_target_associate_ptr (const void *host_ptr, const void *device_ptr,
 			  size_t size, size_t device_offset, int device_num)
 {
-  if (device_num == omp_default_device)
-    device_num = gomp_get_default_device ();
-
   if (device_num == omp_initial_device
       || device_num == gomp_get_num_devices ())
     return EINVAL;
@@ -5649,11 +4813,7 @@ omp_target_disassociate_ptr (const void *ptr, int device_num)
 void *
 omp_get_mapped_ptr (const void *ptr, int device_num)
 {
-  if (device_num == omp_default_device)
-    device_num = gomp_get_default_device ();
-
-  if (ptr == NULL
-      || device_num == omp_initial_device
+  if (device_num == omp_initial_device
       || device_num == omp_get_initial_device ())
     return (void *) ptr;
 
@@ -5661,8 +4821,10 @@ omp_get_mapped_ptr (const void *ptr, int device_num)
   if (devicep == NULL)
     return NULL;
 
-  bool is_shared = (!(devicep->capabilities & GOMP_OFFLOAD_CAP_OPENMP_400)
-		    || devicep->capabilities & GOMP_OFFLOAD_CAP_SHARED_MEM);
+  if (!(devicep->capabilities & GOMP_OFFLOAD_CAP_OPENMP_400)
+      || devicep->capabilities & GOMP_OFFLOAD_CAP_SHARED_MEM)
+    return (void *) ptr;
+
   gomp_mutex_lock (&devicep->lock);
 
   struct splay_tree_s *mem_map = &devicep->mem_map;
@@ -5677,8 +4839,6 @@ omp_get_mapped_ptr (const void *ptr, int device_num)
     {
       uintptr_t offset = cur_node.host_start - n->host_start;
       ret = (void *) (n->tgt->tgt_start + n->tgt_offset + offset);
-      if (is_shared && n->refcount == REFCOUNT_LINK)
-	ret = NULL;
     }
 
   gomp_mutex_unlock (&devicep->lock);
@@ -5689,12 +4849,6 @@ omp_get_mapped_ptr (const void *ptr, int device_num)
 int
 omp_target_is_accessible (const void *ptr, size_t size, int device_num)
 {
-  if (ptr == NULL || size == 0)
-    return false;
-
-  if (device_num == omp_default_device)
-    device_num = gomp_get_default_device ();
-
   if (device_num == omp_initial_device
       || device_num == gomp_get_num_devices ())
     return true;
@@ -5703,27 +4857,15 @@ omp_target_is_accessible (const void *ptr, size_t size, int device_num)
   if (devicep == NULL)
     return false;
 
-  /* Managed memory (or other device feature).
-     is_accessible_ptr may, in future, report more than simply true or false,
-     but we can assume that positive responses are accessible, and
-     zero/negative responses are inaccessible.  */
-  if (devicep->is_accessible_ptr_func)
-    return (devicep->is_accessible_ptr_func (devicep->target_id, ptr, size)
-	    > 0);
+  /* TODO: Unified shared memory must be handled when available.  */
 
-  /* Unified shared memory (or true shared memory).  */
-  if (devicep->capabilities & GOMP_OFFLOAD_CAP_SHARED_MEM)
-    return true;
-
-  return false;
+  return devicep->capabilities & GOMP_OFFLOAD_CAP_SHARED_MEM;
 }
 
 int
 omp_pause_resource (omp_pause_resource_t kind, int device_num)
 {
   (void) kind;
-  if (device_num == omp_default_device)
-    device_num = gomp_get_default_device ();
   if (device_num == omp_initial_device
       || device_num == gomp_get_num_devices ())
     return gomp_pause_host ();
@@ -5749,325 +4891,6 @@ omp_pause_resource_all (omp_pause_resource_t kind)
 ialias (omp_pause_resource)
 ialias (omp_pause_resource_all)
 
-int
-omp_get_num_interop_properties (const omp_interop_t interop
-				__attribute__ ((unused)))
-{
-  /* Zero implementation defined. In total:
-     omp_get_num_interop_properties () - omp_ipr_first.  */
-  return 0;
-}
-
-omp_intptr_t
-omp_get_interop_int (const omp_interop_t interop,
-		     omp_interop_property_t property_id,
-		     omp_interop_rc_t *ret_code)
-{
-  struct interop_obj_t *obj = (struct interop_obj_t *) interop;
-  struct gomp_device_descr *devicep;
-
-  if (property_id < omp_ipr_first || property_id >= 0)
-    {
-      if (ret_code)
-	*ret_code = omp_irc_out_of_range;
-      return 0;
-    }
-  if (obj == NULL
-      || (devicep = resolve_device (obj->device_num, false)) == NULL
-      || devicep->get_interop_int_func == NULL)
-    {
-      if (ret_code)
-	*ret_code = omp_irc_empty;  /* Assume omp_interop_none.  */
-      return 0;
-    }
-  return devicep->get_interop_int_func (obj, property_id, ret_code);
-}
-
-void *
-omp_get_interop_ptr (const omp_interop_t interop,
-		     omp_interop_property_t property_id,
-		     omp_interop_rc_t *ret_code)
-{
-  struct interop_obj_t *obj = (struct interop_obj_t *) interop;
-  struct gomp_device_descr *devicep;
-
-  if (property_id < omp_ipr_first || property_id >= 0)
-    {
-      if (ret_code)
-	*ret_code = omp_irc_out_of_range;
-      return 0;
-    }
-  if (obj == NULL
-      || (devicep = resolve_device (obj->device_num, false)) == NULL
-      || devicep->get_interop_int_func == NULL)
-    {
-      if (ret_code)
-	*ret_code = omp_irc_empty;  /* Assume omp_interop_none.  */
-      return 0;
-    }
-  return devicep->get_interop_ptr_func (obj, property_id, ret_code);
-}
-
-const char *
-omp_get_interop_str (const omp_interop_t interop,
-		     omp_interop_property_t property_id,
-		     omp_interop_rc_t *ret_code)
-{
-  struct interop_obj_t *obj = (struct interop_obj_t *) interop;
-  struct gomp_device_descr *devicep;
-
-  if (property_id < omp_ipr_first || property_id >= 0)
-    {
-      if (ret_code)
-	*ret_code = omp_irc_out_of_range;
-      return 0;
-    }
-  if (obj == NULL
-      || (devicep = resolve_device (obj->device_num, false)) == NULL
-      || devicep->get_interop_int_func == NULL)
-    {
-      if (ret_code)
-	*ret_code = omp_irc_empty;  /* Assume omp_interop_none.  */
-      return 0;
-    }
-  return devicep->get_interop_str_func (obj, property_id, ret_code);
-}
-
-const char *
-omp_get_interop_name (const omp_interop_t interop __attribute__ ((unused)),
-		      omp_interop_property_t property_id)
-{
-  static const char *prop_string[0 - omp_ipr_first]
-    = {"fr_id", "fr_name", "vendor", "vendor_name", "device_num", "platform",
-       "device", "device_context", "targetsync"};
-  if (property_id < omp_ipr_first || property_id >= 0)
-    return NULL;
-  return prop_string[omp_ipr_fr_id - property_id];
-}
-
-const char *
-omp_get_interop_type_desc (const omp_interop_t interop,
-			   omp_interop_property_t property_id)
-{
-  static const char *desc[omp_ipr_fr_id - omp_ipr_device_num + 1]
-    = {"omp_interop_t", /* fr_id */
-       "const char *",	/* fr_name */
-       "int",		/* vendor */
-       "const char *",	/* vendor_name */
-       "int"};		/* device_num */
-
-  struct interop_obj_t *obj = (struct interop_obj_t *) interop;
-  struct gomp_device_descr *devicep;
-
-  if (property_id > omp_ipr_fr_id || property_id < omp_ipr_first)
-    return NULL;
-  if (obj == NULL
-      || (devicep = resolve_device (obj->device_num, false)) == NULL
-      || devicep->get_interop_int_func == NULL)
-    return NULL;
-  if (property_id >= omp_ipr_device_num)
-    return desc[omp_ipr_fr_id - property_id];
-  return devicep->get_interop_type_desc_func (obj, property_id);
-}
-
-const char *
-omp_get_interop_rc_desc (const omp_interop_t interop __attribute__ ((unused)),
-			 omp_interop_rc_t ret_code)
-{
-  static const char *rc_strings[omp_irc_no_value - omp_irc_other]
-    = {"no meaningful value available",
-       "successful",
-       "provided interoperability object is equal to omp_interop_none",
-       "property ID is out of range",
-       "property type is integer; use omp_get_interop_int",
-       "property type is pointer; use omp_get_interop_ptr",
-       "property type is string; use omp_get_interop_str"};
-
-  /* omp_irc_other is returned by device-side omp_get_interop_{int,ptr,str};
-     on the host it is not used, hence, return NULL here.   */
-  if (ret_code > omp_irc_no_value || ret_code <= omp_irc_other)
-    return NULL;
-  return rc_strings[omp_irc_no_value - ret_code];
-}
-
-ialias (omp_get_num_interop_properties)
-ialias (omp_get_interop_int)
-ialias (omp_get_interop_ptr)
-ialias (omp_get_interop_str)
-ialias (omp_get_interop_name)
-ialias (omp_get_interop_type_desc)
-ialias (omp_get_interop_rc_desc)
-
-struct interop_data_t
-{
-  int device_num, n_init, n_use, n_destroy;
-  struct interop_obj_t ***init;
-  struct interop_obj_t **use;
-  struct interop_obj_t ***destroy;
-  const int *target_targetsync;
-  const char **prefer_type;
-};
-
-static void
-gomp_interop_internal (void *data)
-{
-  struct interop_data_t *args = (struct interop_data_t *) data;
-  struct gomp_device_descr *devicep;
-
-  /* Destroy objects to free resources.  */
-  for (int i = 0; i < args->n_destroy; i++)
-    {
-      struct interop_obj_t **obj = args->destroy[i];
-      if (*obj == NULL /* omp_interop_none */)
-	continue;
-      devicep = resolve_device ((*obj)->device_num, false);
-      if (devicep != NULL && devicep->interop_func)
-	devicep->interop_func (*obj, devicep->target_id,
-			       gomp_interop_flag_destroy, false, NULL);
-      free (*obj);
-      *obj = NULL;
-    }
-
-  /* Init streams next to give 'use' more time for completion.  */
-  if (args->n_init)
-    {
-      devicep = resolve_device (args->device_num, false);
-      for (int i = 0; i < args->n_init; i++)
-	{
-	  struct interop_obj_t **obj = args->init[i];
-	  bool targetsync
-	    = (args->target_targetsync[i] & GOMP_INTEROP_TARGETSYNC);
-	  const char *prefer_type
-	    = (args->prefer_type ? args->prefer_type[i] : NULL);
-	  if (devicep == NULL || !devicep->interop_func)
-	    {
-	      *obj = NULL;
-	      continue;
-	    }
-	  *obj =
-	    (struct interop_obj_t *) calloc (1, sizeof (struct interop_obj_t));
-	  (*obj)->device_num = devicep->target_id;
-	  devicep->interop_func (*obj, devicep->target_id,
-				 gomp_interop_flag_init, targetsync,
-				 prefer_type);
-	}
-    }
-
-  for (int i = 0; i < args->n_use; i++)
-    {
-      struct interop_obj_t *obj = args->use[i];
-      if (obj == NULL)
-	continue;
-      devicep = resolve_device (obj->device_num, false);
-      if (devicep != NULL && devicep->interop_func)
-	devicep->interop_func (obj, devicep->target_id,
-			       gomp_interop_flag_use, false, NULL);
-    }
-}
-
-/* Process the OpenMP interop directive. 'init' and 'destroy' take an array
-   of 'omp_interop_t *', 'use' an array of 'omp_interop_t', where
-   'omp_interop_t' is internally 'struct interop_obj_t *';
-   'flags' is used for the 'nowait' clause.  */
-
-void
-GOMP_interop (int device_num, int n_init, struct interop_obj_t ***init,
-	      const int *target_targetsync, const char **prefer_type, int n_use,
-	      struct interop_obj_t **use, int n_destroy,
-	      struct interop_obj_t ***destroy, unsigned int flags,
-	      void **depend)
-{
-  struct interop_data_t args;
-  args.device_num = device_num;
-  args.n_init = n_init;
-  args.n_use = n_use;
-  args.n_destroy = n_destroy;
-  args.init = init;
-  args.target_targetsync = target_targetsync;
-  args.prefer_type = prefer_type;
-  args.use = use;
-  args.destroy = destroy;
-
-  /* No need to create a task for 'init' as that should be fast. */
-  bool use_task = false;
-  if (flags & GOMP_INTEROP_FLAG_NOWAIT)
-    {
-      for (int i = 0; i < n_use && !use_task; i++)
-	if (args.use[i])
-	  use_task |= args.use[i]->stream != NULL;
-      for (int i = 0; i < n_destroy && !use_task; i++)
-	if (*args.destroy[i])
-	  use_task |= (*args.destroy[i])->stream != NULL;
-    }
-
-  if (use_task)
-    GOMP_task (gomp_interop_internal, &args, NULL, sizeof (args),
-	       __alignof__ (args), true, depend ? GOMP_TASK_FLAG_DEPEND : 0,
-	       depend, 0, NULL);
-  else
-    {
-      gomp_interop_internal (&args);
-      if (depend)
-	GOMP_taskwait_depend (depend);
-    }
-}
-
-static const char *
-gomp_get_uid_for_device (struct gomp_device_descr *devicep, int device_num)
-{
-  if (devicep->uid)
-    return devicep->uid;
-
-  if (devicep->get_uid_func)
-    devicep->uid = devicep->get_uid_func (devicep->target_id);
-  if (!devicep->uid)
-    {
-      size_t ln = strlen (STR_OMP_DEV_PREFIX) + 10 + 1;
-      char *uid;
-      uid = gomp_malloc (ln);
-      snprintf (uid, ln, "%s%d", STR_OMP_DEV_PREFIX, device_num);
-      devicep->uid = uid;
-    }
-  return devicep->uid;
-}
-
-const char *
-omp_get_uid_from_device (int device_num)
-{
-  if (device_num == omp_default_device)
-    device_num = gomp_get_default_device ();
-
-  if (device_num < omp_initial_device || device_num > gomp_get_num_devices ())
-    return NULL;
-
-  if (device_num == omp_initial_device || device_num == gomp_get_num_devices ())
-    return str_omp_initial_device;
-
-  struct gomp_device_descr *devicep = resolve_device (device_num, false);
-  if (devicep == NULL)
-    return NULL;
-  return gomp_get_uid_for_device (devicep, device_num);
-}
-
-int
-omp_get_device_from_uid (const char *uid)
-{
-  if (uid == NULL)
-    return omp_invalid_device;
-  if (strcmp (uid, str_omp_initial_device) == 0)
-    return omp_initial_device;
-  for (int dev = 0; dev < gomp_get_num_devices (); dev++)
-    {
-      struct gomp_device_descr *devicep = resolve_device (dev, false);
-      if (strcmp (uid, gomp_get_uid_for_device (devicep, dev)) == 0)
-	return dev;
-    }
-  return omp_invalid_device;
-}
-
-ialias (omp_get_uid_from_device)
-ialias (omp_get_device_from_uid)
-
 #ifdef PLUGIN_SUPPORT
 
 /* This function tries to load a plugin for DEVICE.  Name of plugin is passed
@@ -6092,9 +4915,8 @@ gomp_load_plugin_for_device (struct gomp_device_descr *device,
   /* Check if all required functions are available in the plugin and store
      their handlers.  None of the symbols can legitimately be NULL,
      so we don't need to check dlerror all the time.  */
-#define DLSYM(f) DLSYM2(f, f)
-#define DLSYM2(f, n)							\
-  if (!(device->f##_func = dlsym (plugin_handle, "GOMP_OFFLOAD_" #n)))	\
+#define DLSYM(f)							\
+  if (!(device->f##_func = dlsym (plugin_handle, "GOMP_OFFLOAD_" #f)))	\
     goto dl_fail
   /* Similar, but missing functions are not an error.  Return false if
      failed, true otherwise.  */
@@ -6110,7 +4932,6 @@ gomp_load_plugin_for_device (struct gomp_device_descr *device,
     }
 
   DLSYM (get_name);
-  DLSYM_OPT (get_uid, get_uid);
   DLSYM (get_caps);
   DLSYM (get_type);
   DLSYM (get_num_devices);
@@ -6120,39 +4941,15 @@ gomp_load_plugin_for_device (struct gomp_device_descr *device,
   DLSYM (unload_image);
   DLSYM (alloc);
   DLSYM (free);
-  DLSYM_OPT (managed_alloc, managed_alloc);
-  DLSYM_OPT (managed_free, managed_free);
-  DLSYM_OPT (is_accessible_ptr, is_accessible_ptr);
-  DLSYM_OPT (page_locked_host_alloc, page_locked_host_alloc);
-  DLSYM_OPT (page_locked_host_free, page_locked_host_free);
   DLSYM (dev2host);
   DLSYM (host2dev);
-  DLSYM_OPT (memcpy2d, memcpy2d);
-  DLSYM_OPT (memcpy3d, memcpy3d);
-  if (DLSYM_OPT (interop, interop))
-    {
-      DLSYM (get_interop_int);
-      DLSYM (get_interop_ptr);
-      DLSYM (get_interop_str);
-      DLSYM (get_interop_type_desc);
-    }
-
   device->capabilities = device->get_caps_func ();
-  device->session.size = 0;
   if (device->capabilities & GOMP_OFFLOAD_CAP_OPENMP_400)
     {
-      __typeof (GOMP_OFFLOAD_session_size) *size_func
-	= dlsym (plugin_handle, "GOMP_OFFLOAD_session_size");
-      device->session.size = size_func ();
-      DLSYM2 (session.start, session_start);
-      DLSYM_OPT (session.alloc_tvt, session_allocate_target_var_table);
-      DLSYM2 (session.set_tvt, session_set_target_var_table);
-
       DLSYM (run);
       DLSYM_OPT (async_run, async_run);
       DLSYM_OPT (can_run, can_run);
       DLSYM (dev2dev);
-      DLSYM (memset);
     }
   if (device->capabilities & GOMP_OFFLOAD_CAP_OPENACC_200)
     {
@@ -6171,7 +4968,6 @@ gomp_load_plugin_for_device (struct gomp_device_descr *device,
 	  || !DLSYM_OPT (openacc.async.exec, openacc_async_exec)
 	  || !DLSYM_OPT (openacc.async.dev2host, openacc_async_dev2host)
 	  || !DLSYM_OPT (openacc.async.host2dev, openacc_async_host2dev)
-	  || !DLSYM_OPT (openacc.async.dev2dev, openacc_async_dev2dev)
 	  || !DLSYM_OPT (openacc.get_property, openacc_get_property))
 	{
 	  /* Require all the OpenACC handlers if we have
@@ -6195,7 +4991,6 @@ gomp_load_plugin_for_device (struct gomp_device_descr *device,
 	}
     }
 #undef DLSYM
-#undef DLSYM2
 #undef DLSYM_OPT
 
   return 1;
@@ -6289,7 +5084,8 @@ gomp_target_init (void)
 		    found = true;
 		if (found)
 		  {
-		    char buf[GOMP_REQUIRES_NAME_BUF_LEN];
+		    char buf[sizeof ("unified_address, unified_shared_memory, "
+				     "reverse_offload")];
 		    gomp_requires_to_name (buf, sizeof (buf), omp_req);
 		    char *name = (char *) malloc (cur_len + 1);
 		    memcpy (name, cur, cur_len);
@@ -6304,12 +5100,6 @@ gomp_target_init (void)
 	      {
 		/* Augment DEVICES and NUM_DEVICES.  */
 
-		/* If USM has been requested and is supported by all devices
-		   of this type, set the capability accordingly.  */
-		if (omp_requires_mask
-		    & (GOMP_REQUIRES_UNIFIED_SHARED_MEMORY | GOMP_REQUIRES_SELF_MAPS))
-		  current_device.capabilities |= GOMP_OFFLOAD_CAP_SHARED_MEM;
-
 		devs = realloc (devs, (num_devs + new_num_devs)
 				      * sizeof (struct gomp_device_descr));
 		if (!devs)
@@ -6320,8 +5110,6 @@ gomp_target_init (void)
 		  }
 
 		current_device.name = current_device.get_name_func ();
-		/* Defer UID setting until needed + after gomp_init_device.  */
-		current_device.uid = NULL;
 		/* current_device.capabilities has already been set.  */
 		current_device.type = current_device.get_type_func ();
 		current_device.mem_map.root = NULL;
@@ -6370,15 +5158,6 @@ gomp_target_init (void)
 	 takes a copy of the pointer argument) must be delayed until now.  */
       if (devs[i].capabilities & GOMP_OFFLOAD_CAP_OPENACC_200)
 	goacc_register (&devs[i]);
-    }
-  if (gomp_global_icv.default_device_var == INT_MIN)
-    {
-       /* This implies OMP_TARGET_OFFLOAD=mandatory.  */
-       struct gomp_icv_list *none;
-       none = gomp_get_initial_icv_item (GOMP_DEVICE_NUM_FOR_NO_SUFFIX);
-       gomp_global_icv.default_device_var = (num_devs_openmp
-					     ? 0 : omp_invalid_device);
-       none->icvs.default_device_var = gomp_global_icv.default_device_var;
     }
 
   num_devices = num_devs;
