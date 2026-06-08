@@ -468,6 +468,7 @@ goacc_new_thread (void)
   return thr;
 }
 
+#ifdef LIBGOMP_USE_PTHREADS
 static void
 goacc_destroy_thread (void *data)
 {
@@ -507,6 +508,7 @@ goacc_destroy_thread (void *data)
 
   gomp_mutex_unlock (&goacc_thread_lock);
 }
+#endif
 
 /* Use the ORD'th device instance for the current host thread (or -1 for the
    current global default).  The device (and the runtime) must be initialised
