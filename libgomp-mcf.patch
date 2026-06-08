@@ -1,0 +1,2193 @@
+--- gcc-13.2.0/libgomp/configure.ac	2023-07-27 16:17:14.000000000 +0800
++++ patches/gcc/libgomp/configure.ac	2026-06-07 23:06:40.215218700 +0800
+@@ -29,6 +29,22 @@
+
+
+ # -------
++# Thread model selection
++# -------
++# GCC's top-level configure passes --enable-threads=mcf via target_configargs
++# when configured with --enable-threads=mcf.  Detect it here.
++# -------
++
++AC_MSG_CHECKING([for thread model])
++libgomp_thread_model=posix
++case "x$enable_threads" in
++  xmcf)
++    libgomp_thread_model=mcf
++    ;;
++esac
++AC_MSG_RESULT($libgomp_thread_model)
++
++# -------
+ # -------
+
+ # Gets build, host, target, *_vendor, *_cpu, *_os, etc.
+@@ -182,39 +198,52 @@
+ AC_HEADER_TIME
+ ACX_HEADER_STRING
+ AC_CHECK_HEADERS(pthread.h unistd.h semaphore.h sys/loadavg.h sys/sysctl.h sys/time.h)
++if test x$libgomp_thread_model = xmcf; then
++  AC_CHECK_HEADERS([mcfgthread/thread.h mcfgthread/mutex.h mcfgthread/sem.h \
++    mcfgthread/cond.h mcfgthread/clock.h mcfgthread/fwd.h mcfgthread/once.h \
++    mcfgthread/tls.h mcfgthread/atomic.h mcfgthread/dtor_queue.h])
++fi
+
+ XPCFLAGS=""
+-case "$host" in
+-  *-*-rtems*)
+-    # RTEMS supports Pthreads, but the library is not available at GCC build time.
+-    ;;
+-  nvptx*-*-* | amdgcn*-*-*)
+-    # NVPTX does not support Pthreads, has its own code replacement.
+-    libgomp_use_pthreads=no
+-    # NVPTX is an accelerator-only target
+-    libgomp_offloaded_only=yes
+-    ;;
+-  *)
+-    # Check to see if -pthread or -lpthread is needed.  Prefer the former.
+-    # In case the pthread.h system header is not found, this test will fail.
+-    CFLAGS="$CFLAGS -pthread"
+-    AC_LINK_IFELSE(
+-     [AC_LANG_PROGRAM(
+-      [#include <pthread.h>
+-       void *g(void *d) { return NULL; }],
+-      [pthread_t t; pthread_create(&t,NULL,g,NULL);])],
+-     [XPCFLAGS=" -Wc,-pthread"],
+-     [CFLAGS="$save_CFLAGS" LIBS="-lpthread $LIBS"
++if test x$libgomp_thread_model = xmcf; then
++  libgomp_use_pthreads=no
++  LIBS="-lmcfgthread $LIBS"
++else
++  case "$host" in
++    *-*-rtems*)
++      # RTEMS supports Pthreads, but the library is not available at GCC build time.
++      ;;
++    nvptx*-*-* | amdgcn*-*-*)
++      # NVPTX does not support Pthreads, has its own code replacement.
++      libgomp_use_pthreads=no
++      # NVPTX is an accelerator-only target
++      libgomp_offloaded_only=yes
++      ;;
++    *)
++      # Check to see if -pthread or -lpthread is needed.  Prefer the former.
++      # In case the pthread.h system header is not found, this test will fail.
++      CFLAGS="$CFLAGS -pthread"
+       AC_LINK_IFELSE(
+        [AC_LANG_PROGRAM(
+         [#include <pthread.h>
+          void *g(void *d) { return NULL; }],
+         [pthread_t t; pthread_create(&t,NULL,g,NULL);])],
+-       [],
+-       [AC_MSG_ERROR([Pthreads are required to build libgomp])])])
+-esac
++       [XPCFLAGS=" -Wc,-pthread"],
++       [CFLAGS="$save_CFLAGS" LIBS="-lpthread $LIBS"
++        AC_LINK_IFELSE(
++         [AC_LANG_PROGRAM(
++          [#include <pthread.h>
++           void *g(void *d) { return NULL; }],
++          [pthread_t t; pthread_create(&t,NULL,g,NULL);])],
++         [],
++         [AC_MSG_ERROR([Pthreads are required to build libgomp])])])
++  esac
++fi
+
+-if test x$libgomp_use_pthreads != xno; then
++if test x$libgomp_thread_model = xmcf; then
++  AC_DEFINE(LIBGOMP_USE_MCFGTHREAD, 1,
++            [Define to 1 if libgomp should use MCF Gthread.])
++elif test x$libgomp_use_pthreads != xno; then
+   AC_DEFINE(LIBGOMP_USE_PTHREADS, 1,
+             [Define to 1 if libgomp should use POSIX threads.])
+ fi
+@@ -255,6 +284,7 @@
+
+ GCC_LINUX_FUTEX(:)
+
++if test x$libgomp_thread_model != xmcf; then
+ # Check for pthread_{,attr_}[sg]etaffinity_np.
+ AC_LINK_IFELSE(
+  [AC_LANG_PROGRAM(
+@@ -273,6 +303,7 @@
+    pthread_attr_setaffinity_np (&attr, sizeof (cpu_set_t), &cpuset);])],
+   AC_DEFINE(HAVE_PTHREAD_AFFINITY_NP, 1,
+ [	Define if pthread_{,attr_}{g,s}etaffinity_np is supported.]))
++fi
+
+ # At least for glibc, clock_gettime is in librt.  But don't pull that
+ # in if it still doesn't give us the function we want.
+@@ -391,10 +422,14 @@
+ # Note that the GOMP_SELF_SPEC in gcc.c may force -pthread,
+ # which will force linkage against -lpthread (or equivalent for the system).
+ # That's not 100% ideal, but about the best we can do easily.
+-if test $enable_shared = yes; then
+-  link_gomp="-lgomp %{static: $LIBS}"
++if test x$libgomp_thread_model = xmcf; then
++  link_gomp="-lgomp %{static: $LIBS -lmcfgthread}"
+ else
+-  link_gomp="-lgomp $LIBS"
++  if test $enable_shared = yes; then
++    link_gomp="-lgomp %{static: $LIBS}"
++  else
++    link_gomp="-lgomp $LIBS"
++  fi
+ fi
+ AC_SUBST(link_gomp)
+
+--- gcc-13.2.0/libgomp/configure.tgt	2023-07-27 16:13:08.000000000 +0800
++++ patches/gcc/libgomp/configure.tgt	2026-06-07 23:08:03.595538600 +0800
+@@ -142,7 +142,11 @@
+ 	;;
+
+   *-*-mingw32*)
+-	config_path="mingw32 posix"
++	if test "x$libgomp_thread_model" = xmcf; then
++	  config_path="mcfgthread mingw32"
++	else
++	  config_path="mingw32 posix"
++	fi
+ 	;;
+
+   *-*-darwin*)
+--- gcc-13.2.0/libgomp/config.h.in	2023-07-27 16:17:14.000000000 +0800
++++ patches/gcc/libgomp/config.h.in	2026-06-07 23:08:51.225228900 +0800
+@@ -133,6 +133,9 @@
+ /* Define to 1 if building libgomp for an accelerator-only target. */
+ #undef LIBGOMP_OFFLOADED_ONLY
+
++/* Define to 1 if libgomp should use MCF Gthread. */
++#undef LIBGOMP_USE_MCFGTHREAD
++
+ /* Define to 1 if libgomp should use POSIX threads. */
+ #undef LIBGOMP_USE_PTHREADS
+
+--- gcc-13.2.0/libgomp/libgomp.h	2023-07-27 16:13:08.000000000 +0800
++++ patches/gcc/libgomp/libgomp.h	2026-06-07 23:12:22.898538200 +0800
+@@ -49,6 +49,12 @@
+ #ifdef HAVE_PTHREAD_H
+ #include <pthread.h>
+ #endif
++#ifdef LIBGOMP_USE_MCFGTHREAD
++#include <mcfgthread/thread.h>
++#include <mcfgthread/mutex.h>
++#include <mcfgthread/sem.h>
++#include <mcfgthread/clock.h>
++#endif
+ #include <stdbool.h>
+ #include <stdlib.h>
+ #include <stdarg.h>
+@@ -883,7 +889,7 @@
+   /* User pthread thread pool */
+   struct gomp_thread_pool *thread_pool;
+
+-#ifdef LIBGOMP_USE_PTHREADS
++#if defined(LIBGOMP_USE_PTHREADS) || defined(LIBGOMP_USE_MCFGTHREAD)
+   /* omp_get_num_teams () - 1.  */
+   unsigned int num_teams;
+
+@@ -903,6 +909,9 @@
+ #define GOMP_NEEDS_THREAD_HANDLE 1
+   pthread_t handle;
+ #endif
++#ifdef LIBGOMP_USE_MCFGTHREAD
++  _MCF_thread *mcf_handle;
++#endif
+ };
+
+
+@@ -998,6 +1007,10 @@
+ extern pthread_key_t gomp_thread_destructor;
+ #endif
+
++#ifdef LIBGOMP_USE_MCFGTHREAD
++extern _MCF_tls_key *gomp_tls_destructor_key;
++#endif
++
+ /* Function prototypes.  */
+
+ /* affinity.c */
+@@ -1025,8 +1038,10 @@
+ extern void gomp_set_affinity_format (const char *, size_t);
+ extern void gomp_display_string (char *, size_t, size_t *, const char *,
+ 				 size_t);
+-#ifdef LIBGOMP_USE_PTHREADS
++#if defined(LIBGOMP_USE_PTHREADS)
+ typedef pthread_t gomp_thread_handle;
++#elif defined(LIBGOMP_USE_MCFGTHREAD)
++typedef _MCF_thread *gomp_thread_handle;
+ #else
+ typedef struct {} gomp_thread_handle;
+ #endif
+@@ -1595,7 +1610,7 @@
+ 				   + priority_queue_offset (type));
+ }
+
+-#ifdef LIBGOMP_USE_PTHREADS
++#if defined(LIBGOMP_USE_PTHREADS)
+ static inline gomp_thread_handle
+ gomp_thread_self (void)
+ {
+@@ -1617,6 +1632,18 @@
+   return pthread_self () + ((uintptr_t) thr - (uintptr_t) this_thr);
+ #endif
+ }
++#elif defined(LIBGOMP_USE_MCFGTHREAD)
++static inline gomp_thread_handle
++gomp_thread_self (void)
++{
++  return _MCF_thread_self ();
++}
++
++static inline gomp_thread_handle
++gomp_thread_to_pthread_t (struct gomp_thread *thr)
++{
++  return thr->mcf_handle;
++}
+ #else
+ static inline gomp_thread_handle
+ gomp_thread_self (void)
+--- gcc-13.2.0/libgomp/team.c	2023-07-27 16:13:08.000000000 +0800
++++ patches/gcc/libgomp/team.c	2026-06-08 11:16:26.940883500 +0800
+@@ -45,8 +45,21 @@
+ pthread_key_t gomp_tls_key;
+ #endif
+
++#endif /* LIBGOMP_USE_PTHREADS */
+
+-/* This structure is used to communicate across pthread_create.  */
++#ifdef LIBGOMP_USE_MCFGTHREAD
++#if defined HAVE_TLS || defined USE_EMUTLS
++__thread struct gomp_thread gomp_tls_data;
++#else
++#error MCF Gthread requires TLS support
++#endif
++
++/* TLS key for thread destructor notification.  */
++_MCF_tls_key *gomp_tls_destructor_key;
++#endif /* LIBGOMP_USE_MCFGTHREAD */
++
++
++/* This structure is used to communicate across thread creation.  */
+
+ struct gomp_thread_start_data
+ {
+@@ -59,17 +72,29 @@
+   unsigned int num_teams;
+   unsigned int team_num;
+   bool nested;
++#ifdef LIBGOMP_USE_PTHREADS
+   pthread_t handle;
++#endif
++#ifdef LIBGOMP_USE_MCFGTHREAD
++  _MCF_thread *handle;
++#endif
+ };
+
+
+-/* This function is a pthread_create entry point.  This contains the idle
++/* This function is a thread entry point.  This contains the idle
+    loop in which a thread waits to be called up to become part of a team.  */
+
++#ifdef LIBGOMP_USE_PTHREADS
+ static void *
+ gomp_thread_start (void *xdata)
+ {
+   struct gomp_thread_start_data *data = xdata;
++#else
++static void
++gomp_thread_start (_MCF_thread *thrd)
++{
++  struct gomp_thread_start_data *data = _MCF_thread_get_data (thrd);
++#endif
+   struct gomp_thread *thr;
+   struct gomp_thread_pool *pool;
+   void (*local_fn) (void *);
+@@ -95,6 +120,9 @@
+ #ifdef GOMP_NEEDS_THREAD_HANDLE
+   thr->handle = data->handle;
+ #endif
++#ifdef LIBGOMP_USE_MCFGTHREAD
++  thr->mcf_handle = _MCF_thread_self ();
++#endif
+ #if !(defined HAVE_TLS || defined USE_EMUTLS)
+   pthread_setspecific (gomp_tls_key, thr);
+ #endif
+@@ -140,12 +168,17 @@
+     }
+
+   gomp_sem_destroy (&thr->release);
++#ifdef LIBGOMP_USE_PTHREADS
+   pthread_detach (pthread_self ());
++#else
++  _MCF_thread_drop_ref (thr->mcf_handle);
++#endif
+   thr->thread_pool = NULL;
+   thr->task = NULL;
++#ifdef LIBGOMP_USE_PTHREADS
+   return NULL;
+-}
+ #endif
++}
+
+ static inline struct gomp_team *
+ get_last_team (unsigned nthreads)
+@@ -250,6 +283,9 @@
+ #ifdef LIBGOMP_USE_PTHREADS
+   pthread_detach (pthread_self ());
+   pthread_exit (NULL);
++#elif defined(LIBGOMP_USE_MCFGTHREAD)
++  _MCF_thread_drop_ref (thr->mcf_handle);
++  _MCF_thread_exit ();
+ #elif defined(__nvptx__)
+   asm ("exit;");
+ #elif defined(__AMDGCN__)
+@@ -315,7 +351,6 @@
+
+ /* Launch a team.  */
+
+-#ifdef LIBGOMP_USE_PTHREADS
+ void
+ gomp_team_start (void (*fn) (void *), void *data, unsigned nthreads,
+ 		 unsigned flags, struct gomp_team *team,
+@@ -328,7 +363,9 @@
+   bool nested;
+   struct gomp_thread_pool *pool;
+   unsigned i, n, old_threads_used = 0;
++#ifdef LIBGOMP_USE_PTHREADS
+   pthread_attr_t thread_attr, *attr;
++#endif
+   unsigned long nthreads_var;
+   char bind, bind_var;
+   unsigned int s = 0, rest = 0, p = 0, k = 0;
+@@ -369,6 +406,9 @@
+ #ifdef GOMP_NEEDS_THREAD_HANDLE
+   thr->handle = pthread_self ();
+ #endif
++#ifdef LIBGOMP_USE_MCFGTHREAD
++  thr->mcf_handle = _MCF_thread_self ();
++#endif
+   nthreads_var = icv->nthreads_var;
+   if (__builtin_expect (gomp_nthreads_var_list != NULL, 0)
+       && thr->ts.level < gomp_nthreads_var_list_len)
+@@ -746,6 +786,7 @@
+ #endif
+     }
+
++#ifdef LIBGOMP_USE_PTHREADS
+   attr = &gomp_thread_attr;
+   if (__builtin_expect (gomp_places_list != NULL, 0))
+     {
+@@ -755,6 +796,7 @@
+ 	pthread_attr_setstacksize (&thread_attr, stacksize);
+       attr = &thread_attr;
+     }
++#endif
+
+   start_data = gomp_alloca (sizeof (struct gomp_thread_start_data)
+ 			    * (nthreads - i));
+@@ -762,7 +804,9 @@
+   /* Launch new threads.  */
+   for (; i < nthreads; ++i)
+     {
++#ifdef LIBGOMP_USE_PTHREADS
+       int err;
++#endif
+
+       start_data->ts.place_partition_off = thr->ts.place_partition_off;
+       start_data->ts.place_partition_len = thr->ts.place_partition_len;
+@@ -828,7 +872,9 @@
+ 	  start_data->place = p + 1;
+ 	  if (affinity_thr != NULL && pool->threads[i] != NULL)
+ 	    continue;
++#ifdef LIBGOMP_USE_PTHREADS
+ 	  gomp_init_thread_affinity (attr, p);
++#endif
+ 	}
+
+       start_data->fn = fn;
+@@ -854,6 +900,7 @@
+       start_data->thread_pool = pool;
+       start_data->nested = nested;
+
++#ifdef LIBGOMP_USE_PTHREADS
+       attr = gomp_adjust_thread_attr (attr, &thread_attr);
+       err = pthread_create (&start_data->handle, attr, gomp_thread_start,
+ 			    start_data);
+@@ -864,6 +911,15 @@
+
+   if (__builtin_expect (attr == &thread_attr, 0))
+     pthread_attr_destroy (&thread_attr);
++#else
++      start_data->handle = _MCF_thread_new (
++	  gomp_thread_start, start_data,
++	  sizeof (*start_data));
++      if (start_data->handle == NULL)
++	gomp_fatal ("Thread creation failed");
++      start_data++;
++    }
++#endif
+
+  do_release:
+   if (nested)
+@@ -937,7 +993,6 @@
+       && team->prev_ts.place_partition_len > 64)
+     free (affinity_thr);
+ }
+-#endif
+
+
+ /* Terminate the current team.  This is only to be called by the master
+@@ -1039,8 +1094,24 @@
+   pthread_key_delete (gomp_thread_destructor);
+ }
+
++#elif defined(LIBGOMP_USE_MCFGTHREAD)
++
++static void __attribute__((constructor))
++initialize_team (void)
++{
++  gomp_tls_destructor_key = _MCF_tls_key_new (NULL);
++  if (gomp_tls_destructor_key == NULL)
++    gomp_fatal ("could not create MCF Gthread TLS key.");
++}
++
++static void __attribute__((destructor))
++team_destructor (void)
++{
++  _MCF_tls_key_delete (gomp_tls_destructor_key);
++}
++
+ /* Similar to gomp_free_pool_helper, but don't detach itself,
+-   gomp_pause_host will pthread_join those threads.  */
++   gomp_pause_host will join those threads.  */
+
+ static void
+ gomp_pause_pool_helper (void *thread_pool)
+@@ -1052,7 +1123,7 @@
+   gomp_sem_destroy (&thr->release);
+   thr->thread_pool = NULL;
+   thr->task = NULL;
+-  pthread_exit (NULL);
++  _MCF_thread_exit ();
+ }
+
+ /* Free a thread pool and release its threads.  Return non-zero on
+@@ -1070,8 +1141,13 @@
+       if (pool->threads_used > 0)
+ 	{
+ 	  int i;
++#ifdef LIBGOMP_USE_PTHREADS
+ 	  pthread_t *thrs
+ 	    = gomp_alloca (sizeof (pthread_t) * pool->threads_used);
++#else
++	  _MCF_thread **thrs
++	    = gomp_alloca (sizeof (_MCF_thread *) * pool->threads_used);
++#endif
+ 	  for (i = 1; i < pool->threads_used; i++)
+ 	    {
+ 	      struct gomp_thread *nthr = pool->threads[i];
+@@ -1095,8 +1171,13 @@
+ 	  gomp_managed_threads -= pool->threads_used - 1L;
+ 	  gomp_mutex_unlock (&gomp_managed_threads_lock);
+ #endif
++#ifdef LIBGOMP_USE_PTHREADS
+ 	  for (i = 1; i < pool->threads_used; i++)
+ 	    pthread_join (thrs[i], NULL);
++#else
++	  for (i = 1; i < pool->threads_used; i++)
++	    _MCF_thread_wait (thrs[i], NULL);
++#endif
+ 	}
+       if (pool->last_team)
+ 	free_team (pool->last_team);
+@@ -1120,5 +1201,8 @@
+ #ifdef LIBGOMP_USE_PTHREADS
+   pthread_setspecific (gomp_thread_destructor, thr);
+ #endif
++#ifdef LIBGOMP_USE_MCFGTHREAD
++  _MCF_tls_set (gomp_tls_destructor_key, thr);
++#endif
+   return &task->icv;
+ }
+--- gcc-13.2.0/libgomp/target.c	2023-07-27 16:13:08.000000000 +0800
++++ patches/gcc/libgomp/target.c	2026-06-07 23:27:47.526163200 +0800
+@@ -75,7 +75,12 @@
+ static void gomp_target_init (void);
+
+ /* The whole initialization code for offloading plugins is only run one.  */
++#ifdef LIBGOMP_USE_PTHREADS
+ static pthread_once_t gomp_is_initialized = PTHREAD_ONCE_INIT;
++#elif defined(LIBGOMP_USE_MCFGTHREAD)
++#include <mcfgthread/once.h>
++static _MCF_once gomp_is_initialized = {0};
++#endif
+
+ /* Mutex for offload image registration.  */
+ static gomp_mutex_t register_lock;
+@@ -125,7 +130,16 @@
+ attribute_hidden void
+ gomp_init_targets_once (void)
+ {
++#ifdef LIBGOMP_USE_PTHREADS
+   (void) pthread_once (&gomp_is_initialized, gomp_target_init);
++#elif defined(LIBGOMP_USE_MCFGTHREAD)
++  int r = _MCF_once_wait (&gomp_is_initialized, NULL);
++  if (r == 1)
++    {
++      gomp_target_init ();
++      _MCF_once_release (&gomp_is_initialized);
++    }
++#endif
+ }
+
+ attribute_hidden int
+@@ -3061,7 +3075,11 @@
+ 	      thr->task = &team->implicit_task[0];
+ 	    }
+ 	  else
++#ifdef LIBGOMP_USE_PTHREADS
+ 	    pthread_setspecific (gomp_thread_destructor, thr);
++#elif defined(LIBGOMP_USE_MCFGTHREAD)
++	    _MCF_tls_set (gomp_tls_destructor_key, thr);
++#endif
+ 	  if (implicit_task != &task)
+ 	    {
+ 	      *implicit_task = thr->task;
+--- gcc-13.2.0/libgomp/env.c	2023-07-27 16:13:08.000000000 +0800
++++ patches/gcc/libgomp/env.c	2026-06-07 23:29:03.606259300 +0800
+@@ -2273,7 +2273,9 @@
+     gomp_throttled_spin_count_var = gomp_spin_count_var;
+
+   /* Not strictly environment related, but ordering constructors is tricky.  */
++#ifdef LIBGOMP_USE_PTHREADS
+   pthread_attr_init (&gomp_thread_attr);
++#endif
+
+   if (!(none != NULL && gomp_get_icv_flag (none->flags, GOMP_ICV_STACKSIZE)))
+     {
+@@ -2294,6 +2296,7 @@
+     {
+       int err;
+
++#ifdef LIBGOMP_USE_PTHREADS
+       err = pthread_attr_setstacksize (&gomp_thread_attr, stacksize);
+
+ #ifdef PTHREAD_STACK_MIN
+@@ -2310,6 +2313,11 @@
+ #endif
+       if (err != 0)
+ 	gomp_error ("Stack size change failed: %s", strerror (err));
++#else
++      /* MCF Gthread manages thread stack sizes internally.  */
++      (void) stacksize;
++      (void) err;
++#endif
+     }
+
+   handle_omp_display_env ();
+--- gcc-13.2.0/libgomp/oacc-init.c	2023-07-27 16:13:08.000000000 +0800
++++ patches/gcc/libgomp/oacc-init.c	2026-06-08 12:18:55.196327200 +0800
+@@ -43,7 +43,11 @@
+ static gomp_mutex_t acc_init_state_lock;
+ static enum { uninitialized, initializing, initialized } acc_init_state
+   = uninitialized;
++#ifdef LIBGOMP_USE_PTHREADS
+ static pthread_t acc_init_thread;
++#elif defined(LIBGOMP_USE_MCFGTHREAD)
++static _MCF_thread *acc_init_thread;
++#endif
+
+ /* A cached version of the dispatcher for the global "current" accelerator type,
+    e.g. used as the default when creating new host threads.  This is the
+@@ -55,10 +59,14 @@
+
+ #if defined HAVE_TLS || defined USE_EMUTLS
+ __thread struct goacc_thread *goacc_tls_data;
+-#else
++#elif defined(LIBGOMP_USE_PTHREADS)
+ pthread_key_t goacc_tls_key;
+ #endif
++#ifdef LIBGOMP_USE_PTHREADS
+ static pthread_key_t goacc_cleanup_key;
++#elif defined(LIBGOMP_USE_MCFGTHREAD)
++static _MCF_tls_key *goacc_cleanup_key;
++#endif
+
+ static struct goacc_thread *goacc_threads;
+ static gomp_mutex_t goacc_thread_lock;
+@@ -235,7 +243,11 @@
+ {
+   gomp_mutex_lock (&acc_init_state_lock);
+   acc_init_state = initializing;
++#ifdef LIBGOMP_USE_PTHREADS
+   acc_init_thread = pthread_self ();
++#elif defined(LIBGOMP_USE_MCFGTHREAD)
++  acc_init_thread = _MCF_thread_self ();
++#endif
+   gomp_mutex_unlock (&acc_init_state_lock);
+
+   bool check_not_nested_p;
+@@ -438,11 +450,15 @@
+
+ #if defined HAVE_TLS || defined USE_EMUTLS
+   goacc_tls_data = thr;
+-#else
++#elif defined(LIBGOMP_USE_PTHREADS)
+   pthread_setspecific (goacc_tls_key, thr);
+ #endif
+
++#ifdef LIBGOMP_USE_PTHREADS
+   pthread_setspecific (goacc_cleanup_key, thr);
++#elif defined(LIBGOMP_USE_MCFGTHREAD)
++  _MCF_tls_set (goacc_cleanup_key, thr);
++#endif
+
+   gomp_mutex_lock (&goacc_thread_lock);
+   thr->next = goacc_threads;
+@@ -452,6 +468,7 @@
+   return thr;
+ }
+
++#ifdef LIBGOMP_USE_PTHREADS
+ static void
+ goacc_destroy_thread (void *data)
+ {
+@@ -491,6 +508,7 @@
+
+   gomp_mutex_unlock (&goacc_thread_lock);
+ }
++#endif
+
+ /* Use the ORD'th device instance for the current host thread (or -1 for the
+    current global default).  The device (and the runtime) must be initialised
+@@ -667,7 +685,12 @@
+   bool res;
+   gomp_mutex_lock (&acc_init_state_lock);
+   res = (acc_init_state == initializing
+-	 && pthread_equal (acc_init_thread, pthread_self ()));
++#ifdef LIBGOMP_USE_PTHREADS
++	 && pthread_equal (acc_init_thread, pthread_self ())
++#elif defined(LIBGOMP_USE_MCFGTHREAD)
++	 && acc_init_thread == _MCF_thread_self ()
++#endif
++	 );
+   gomp_mutex_unlock (&acc_init_state_lock);
+   return res;
+ }
+@@ -884,11 +907,15 @@
+ {
+   gomp_mutex_init (&acc_device_lock);
+
+-#if !(defined HAVE_TLS || defined USE_EMUTLS)
++#if !(defined HAVE_TLS || defined USE_EMUTLS) && defined(LIBGOMP_USE_PTHREADS)
+   pthread_key_create (&goacc_tls_key, NULL);
+ #endif
+
++#ifdef LIBGOMP_USE_PTHREADS
+   pthread_key_create (&goacc_cleanup_key, goacc_destroy_thread);
++#elif defined(LIBGOMP_USE_MCFGTHREAD)
++  goacc_cleanup_key = _MCF_tls_key_new (NULL);
++#endif
+
+   cached_base_dev = NULL;
+
+@@ -902,10 +929,14 @@
+ static void __attribute__((destructor))
+ goacc_runtime_deinitialize (void)
+ {
+-#if !(defined HAVE_TLS || defined USE_EMUTLS)
++#if !(defined HAVE_TLS || defined USE_EMUTLS) && defined(LIBGOMP_USE_PTHREADS)
+   pthread_key_delete (goacc_tls_key);
+ #endif
++#ifdef LIBGOMP_USE_PTHREADS
+   pthread_key_delete (goacc_cleanup_key);
++#elif defined(LIBGOMP_USE_MCFGTHREAD)
++  _MCF_tls_key_delete (goacc_cleanup_key);
++#endif
+ }
+
+ /* Compiler helper functions */
+--- gcc-13.2.0/gcc/config/i386/mingw-w64.h	2023-07-27 16:13:04.000000000 +0800
++++ patches/gcc/gcc/config/i386/mingw-w64.h	2026-06-08 17:38:35.769723300 +0800
+@@ -1,7 +1,7 @@
+ /* Operating system specific defines to be used when targeting GCC for
+    hosting on Windows 32/64 via mingw-w64 runtime, using GNU tools and
+    the Windows API Library.
+-   Copyright (C) 2009-2023 Free Software Foundation, Inc.
++   Copyright (C) 2009-2026 Free Software Foundation, Inc.
+
+ This file is part of GCC.
+
+@@ -25,7 +25,29 @@
+ #define CPP_SPEC "%{posix:-D_POSIX_SOURCE} %{mthreads:-D_MT} " \
+ 		 "%{municode:-DUNICODE} " \
+ 		 "%{" SPEC_PTHREAD1 ":-D_REENTRANT} " \
+		 "%{" SPEC_PTHREAD2 ":-U_REENTRANT} "
++
++
++#undef REAL_LIBGCC_SPEC
++#define REAL_LIBGCC_SPEC \
++  "%{mthreads:-lmingwthrd} -lmingw32 \
++   " SHARED_LIBGCC_SPEC " \
++   -lmingwex %{!mcrtdll=*:-lmsvcrt} %{mcrtdll=*:-l%*} \
++   -lkernel32 " MCFGTHREAD_SPEC
+
+ #undef STARTFILE_SPEC
+ #define STARTFILE_SPEC "%{shared|mdll:dllcrt2%O%s} \
+@@ -43,12 +65,20 @@
+ #define ASM_SPEC "%{m32:--32} %{m64:--64}"
+
+ #undef LIB_SPEC
++#if TARGET_USING_MCFGTHREAD
++#define LIB_SPEC "%{pg:-lgmon} " \
++		 "%{mwindows:-lgdi32 -lcomdlg32} " \
++     "%{fvtable-verify=preinit:-lvtv -lpsapi; \
++        fvtable-verify=std:-lvtv -lpsapi} " \
++		 "-ladvapi32 -lshell32 -luser32 -lkernel32"
++#else
+ #define LIB_SPEC "%{pg:-lgmon} %{" SPEC_PTHREAD1 ":-lpthread} " \
+ 		 "%{" SPEC_PTHREAD2 ": } " \
+ 		 "%{mwindows:-lgdi32 -lcomdlg32} " \
+      "%{fvtable-verify=preinit:-lvtv -lpsapi; \
+         fvtable-verify=std:-lvtv -lpsapi} " \
+ 		 "-ladvapi32 -lshell32 -luser32 -lkernel32"
++#endif
+
+ #undef SPEC_32
+ #undef SPEC_64
+@@ -112,4 +142,4 @@
+    and sincosl functions are available on mingw-w64, but not on the
+    original mingw32.  */
+ #undef TARGET_LIBC_HAS_FUNCTION
+-#define TARGET_LIBC_HAS_FUNCTION gnu_libc_has_function
++#define TARGET_LIBC_HAS_FUNCTION gnu_libc_has_function
+\ No newline at end of file
++++ b/libgomp/config/mcfgthread/bar.c
+--- /dev/null
+@@ -0,0 +1,303 @@
+/* Copyright (C) 2005-2026 Free Software Foundation, Inc.
+   Contributed by Richard Henderson <rth@redhat.com>.
+
+   This file is part of the GNU Offloading and Multi Processing Library
+   (libgomp).
+
+   Libgomp is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 3, or (at your option)
+   any later version.
+
+   Libgomp is distributed in the hope that it will be useful, but WITHOUT ANY
+   WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+   FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+   more details.
+
+   Under Section 7 of GPL version 3, you are granted additional
+   permissions described in the GCC Runtime Library Exception, version
+   3.1, as published by the Free Software Foundation.
+
+   You should have received a copy of the GNU General Public License and
+   a copy of the GCC Runtime Library Exception along with this program;
+   see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
+   <http://www.gnu.org/licenses/>.  */
+
+/* This is the MCF Gthread implementation of a barrier synchronization
+   mechanism for libgomp.  This type is private to the library.
+   Note that we rely on being able to adjust the barrier count while
+   threads are blocked, so the POSIX pthread_barrier_t won't work.  */
+
+#include "libgomp.h"
+
+
+void
+gomp_barrier_init (gomp_barrier_t *bar, unsigned count)
+{
+  gomp_mutex_init (&bar->mutex1);
+#ifndef HAVE_SYNC_BUILTINS
+  gomp_mutex_init (&bar->mutex2);
+#endif
+  gomp_sem_init (&bar->sem1, 0);
+  gomp_sem_init (&bar->sem2, 0);
+  bar->total = count;
+  bar->arrived = 0;
+  bar->generation = 0;
+  bar->cancellable = false;
+}
+
+void
+gomp_barrier_destroy (gomp_barrier_t *bar)
+{
+  /* Before destroying, make sure all threads have left the barrier.  */
+  gomp_mutex_lock (&bar->mutex1);
+  gomp_mutex_unlock (&bar->mutex1);
+
+  gomp_mutex_destroy (&bar->mutex1);
+#ifndef HAVE_SYNC_BUILTINS
+  gomp_mutex_destroy (&bar->mutex2);
+#endif
+  gomp_sem_destroy (&bar->sem1);
+  gomp_sem_destroy (&bar->sem2);
+}
+
+void
+gomp_barrier_reinit (gomp_barrier_t *bar, unsigned count)
+{
+  gomp_mutex_lock (&bar->mutex1);
+  bar->total = count;
+  gomp_mutex_unlock (&bar->mutex1);
+}
+
+void
+gomp_barrier_wait_end (gomp_barrier_t *bar, gomp_barrier_state_t state)
+{
+  unsigned int n;
+
+  if (state & BAR_WAS_LAST)
+    {
+      n = --bar->arrived;
+      if (n > 0)
+	{
+	  do
+	    gomp_sem_post (&bar->sem1);
+	  while (--n != 0);
+	  gomp_sem_wait (&bar->sem2);
+	}
+      gomp_mutex_unlock (&bar->mutex1);
+    }
+  else
+    {
+      gomp_mutex_unlock (&bar->mutex1);
+      gomp_sem_wait (&bar->sem1);
+
+#ifdef HAVE_SYNC_BUILTINS
+      n = __sync_add_and_fetch (&bar->arrived, -1);
+#else
+      gomp_mutex_lock (&bar->mutex2);
+      n = --bar->arrived;
+      gomp_mutex_unlock (&bar->mutex2);
+#endif
+
+      if (n == 0)
+	gomp_sem_post (&bar->sem2);
+    }
+}
+
+void
+gomp_barrier_wait (gomp_barrier_t *barrier)
+{
+  gomp_barrier_wait_end (barrier, gomp_barrier_wait_start (barrier));
+}
+
+void
+gomp_team_barrier_wait_end (gomp_barrier_t *bar, gomp_barrier_state_t state)
+{
+  unsigned int n;
+
+  state &= ~BAR_CANCELLED;
+  if (state & BAR_WAS_LAST)
+    {
+      n = --bar->arrived;
+      struct gomp_thread *thr = gomp_thread ();
+      struct gomp_team *team = thr->ts.team;
+
+      team->work_share_cancelled = 0;
+      unsigned task_count
+	= __atomic_load_n (&team->task_count, MEMMODEL_ACQUIRE);
+      if (task_count)
+	{
+	  gomp_barrier_handle_tasks (state);
+	  if (n > 0)
+	    gomp_sem_wait (&bar->sem2);
+	  gomp_mutex_unlock (&bar->mutex1);
+	  return;
+	}
+
+      bar->generation = state + BAR_INCR - BAR_WAS_LAST;
+      if (n > 0)
+	{
+	  do
+	    gomp_sem_post (&bar->sem1);
+	  while (--n != 0);
+	  gomp_sem_wait (&bar->sem2);
+	}
+      gomp_mutex_unlock (&bar->mutex1);
+    }
+  else
+    {
+      gomp_mutex_unlock (&bar->mutex1);
+      int gen;
+      do
+	{
+	  gomp_sem_wait (&bar->sem1);
+	  gen = __atomic_load_n (&bar->generation, MEMMODEL_ACQUIRE);
+	  if (gen & BAR_TASK_PENDING)
+	    {
+	      gomp_barrier_handle_tasks (state);
+	      gen = __atomic_load_n (&bar->generation, MEMMODEL_ACQUIRE);
+	    }
+	}
+      while (!gomp_barrier_state_is_incremented (gen, state));
+
+#ifdef HAVE_SYNC_BUILTINS
+      n = __sync_add_and_fetch (&bar->arrived, -1);
+#else
+      gomp_mutex_lock (&bar->mutex2);
+      n = --bar->arrived;
+      gomp_mutex_unlock (&bar->mutex2);
+#endif
+
+      if (n == 0)
+	gomp_sem_post (&bar->sem2);
+    }
+}
+
+bool
+gomp_team_barrier_wait_cancel_end (gomp_barrier_t *bar,
+				   gomp_barrier_state_t state)
+{
+  unsigned int n;
+
+  if (state & BAR_WAS_LAST)
+    {
+      bar->cancellable = false;
+      n = --bar->arrived;
+      struct gomp_thread *thr = gomp_thread ();
+      struct gomp_team *team = thr->ts.team;
+
+      team->work_share_cancelled = 0;
+      unsigned task_count
+	= __atomic_load_n (&team->task_count, MEMMODEL_ACQUIRE);
+      if (task_count)
+	{
+	  gomp_barrier_handle_tasks (state);
+	  if (n > 0)
+	    gomp_sem_wait (&bar->sem2);
+	  gomp_mutex_unlock (&bar->mutex1);
+	  return false;
+	}
+
+      bar->generation = state + BAR_INCR - BAR_WAS_LAST;
+      if (n > 0)
+	{
+	  do
+	    gomp_sem_post (&bar->sem1);
+	  while (--n != 0);
+	  gomp_sem_wait (&bar->sem2);
+	}
+      gomp_mutex_unlock (&bar->mutex1);
+    }
+  else
+    {
+      if (state & BAR_CANCELLED)
+	{
+	  gomp_mutex_unlock (&bar->mutex1);
+	  return true;
+	}
+      bar->cancellable = true;
+      gomp_mutex_unlock (&bar->mutex1);
+      int gen;
+      do
+	{
+	  gomp_sem_wait (&bar->sem1);
+	  gen = __atomic_load_n (&bar->generation, MEMMODEL_ACQUIRE);
+	  if (gen & BAR_CANCELLED)
+	    break;
+	  if (gen & BAR_TASK_PENDING)
+	    {
+	      gomp_barrier_handle_tasks (state);
+	      gen = __atomic_load_n (&bar->generation, MEMMODEL_ACQUIRE);
+	      if (gen & BAR_CANCELLED)
+		break;
+	    }
+	}
+      while (!gomp_barrier_state_is_incremented (gen, state));
+
+#ifdef HAVE_SYNC_BUILTINS
+      n = __sync_add_and_fetch (&bar->arrived, -1);
+#else
+      gomp_mutex_lock (&bar->mutex2);
+      n = --bar->arrived;
+      gomp_mutex_unlock (&bar->mutex2);
+#endif
+
+      if (n == 0)
+	gomp_sem_post (&bar->sem2);
+      if (gen & BAR_CANCELLED)
+	return true;
+    }
+  return false;
+}
+
+void
+gomp_team_barrier_wait (gomp_barrier_t *barrier)
+{
+  gomp_team_barrier_wait_end (barrier, gomp_barrier_wait_start (barrier));
+}
+
+void
+gomp_team_barrier_wake (gomp_barrier_t *bar, int count)
+{
+  if (count == 0)
+    count = bar->total - 1;
+  while (count-- > 0)
+    gomp_sem_post (&bar->sem1);
+}
+
+bool
+gomp_team_barrier_wait_cancel (gomp_barrier_t *bar)
+{
+  gomp_barrier_state_t state = gomp_barrier_wait_cancel_start (bar);
+  return gomp_team_barrier_wait_cancel_end (bar, state);
+}
+
+void
+gomp_team_barrier_cancel (struct gomp_team *team)
+{
+  if (team->barrier.generation & BAR_CANCELLED)
+    return;
+  gomp_mutex_lock (&team->barrier.mutex1);
+  gomp_mutex_lock (&team->task_lock);
+  if (team->barrier.generation & BAR_CANCELLED)
+    {
+      gomp_mutex_unlock (&team->task_lock);
+      gomp_mutex_unlock (&team->barrier.mutex1);
+      return;
+    }
+  team->barrier.generation |= BAR_CANCELLED;
+  gomp_mutex_unlock (&team->task_lock);
+  if (team->barrier.cancellable)
+    {
+      int n = team->barrier.arrived;
+      if (n > 0)
+	{
+	  do
+	    gomp_sem_post (&team->barrier.sem1);
+	  while (--n != 0);
+	  gomp_sem_wait (&team->barrier.sem2);
+	}
+      team->barrier.cancellable = false;
+    }
+  gomp_mutex_unlock (&team->barrier.mutex1);
+}
++++ b/libgomp/config/mcfgthread/bar.h
+--- /dev/null
+@@ -0,0 +1,171 @@
+/* Copyright (C) 2005-2026 Free Software Foundation, Inc.
+   Contributed by Richard Henderson <rth@redhat.com>.
+
+   This file is part of the GNU Offloading and Multi Processing Library
+   (libgomp).
+
+   Libgomp is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 3, or (at your option)
+   any later version.
+
+   Libgomp is distributed in the hope that it will be useful, but WITHOUT ANY
+   WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+   FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+   more details.
+
+   Under Section 7 of GPL version 3, you are granted additional
+   permissions described in the GCC Runtime Library Exception, version
+   3.1, as published by the Free Software Foundation.
+
+   You should have received a copy of the GNU General Public License and
+   a copy of the GCC Runtime Library Exception along with this program;
+   see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
+   <http://www.gnu.org/licenses/>.  */
+
+/* This is the MCF Gthread implementation of a barrier synchronization
+   mechanism for libgomp.  This type is private to the library.
+   Note that we rely on being able to adjust the barrier count while
+   threads are blocked, so the POSIX pthread_barrier_t won't work.  */
+
+#ifndef GOMP_BARRIER_H
+#define GOMP_BARRIER_H 1
+
+typedef struct
+{
+  gomp_mutex_t mutex1;
+#ifndef HAVE_SYNC_BUILTINS
+  gomp_mutex_t mutex2;
+#endif
+  gomp_sem_t sem1;
+  gomp_sem_t sem2;
+  unsigned total;
+  unsigned arrived;
+  unsigned generation;
+  bool cancellable;
+} gomp_barrier_t;
+
+typedef unsigned int gomp_barrier_state_t;
+
+/* The generation field contains a counter in the high bits, with a few
+   low bits dedicated to flags.  Note that TASK_PENDING and WAS_LAST can
+   share space because WAS_LAST is never stored back to generation.  */
+#define BAR_TASK_PENDING	1
+#define BAR_WAS_LAST		1
+#define BAR_WAITING_FOR_TASK	2
+#define BAR_CANCELLED		4
+#define BAR_INCR		8
+
+extern void gomp_barrier_init (gomp_barrier_t *, unsigned);
+extern void gomp_barrier_reinit (gomp_barrier_t *, unsigned);
+extern void gomp_barrier_destroy (gomp_barrier_t *);
+
+extern void gomp_barrier_wait (gomp_barrier_t *);
+extern void gomp_barrier_wait_end (gomp_barrier_t *, gomp_barrier_state_t);
+extern void gomp_team_barrier_wait (gomp_barrier_t *);
+extern void gomp_team_barrier_wait_end (gomp_barrier_t *,
+					gomp_barrier_state_t);
+extern bool gomp_team_barrier_wait_cancel (gomp_barrier_t *);
+extern bool gomp_team_barrier_wait_cancel_end (gomp_barrier_t *,
+					       gomp_barrier_state_t);
+extern void gomp_team_barrier_wake (gomp_barrier_t *, int);
+struct gomp_team;
+extern void gomp_team_barrier_cancel (struct gomp_team *);
+
+static inline gomp_barrier_state_t
+gomp_barrier_wait_start (gomp_barrier_t *bar)
+{
+  unsigned int ret;
+  gomp_mutex_lock (&bar->mutex1);
+  ret = bar->generation & (-BAR_INCR | BAR_CANCELLED);
+  if (++bar->arrived == bar->total)
+    ret |= BAR_WAS_LAST;
+  return ret;
+}
+
+static inline gomp_barrier_state_t
+gomp_barrier_wait_cancel_start (gomp_barrier_t *bar)
+{
+  unsigned int ret;
+  gomp_mutex_lock (&bar->mutex1);
+  ret = bar->generation & (-BAR_INCR | BAR_CANCELLED);
+  if (ret & BAR_CANCELLED)
+    return ret;
+  if (++bar->arrived == bar->total)
+    ret |= BAR_WAS_LAST;
+  return ret;
+}
+
+static inline void
+gomp_team_barrier_wait_final (gomp_barrier_t *bar)
+{
+  gomp_team_barrier_wait (bar);
+}
+
+static inline bool
+gomp_barrier_last_thread (gomp_barrier_state_t state)
+{
+  return state & BAR_WAS_LAST;
+}
+
+static inline void
+gomp_barrier_wait_last (gomp_barrier_t *bar)
+{
+  gomp_barrier_wait (bar);
+}
+
+/* All the inlines below must be called with team->task_lock
+   held.  */
+
+static inline void
+gomp_team_barrier_set_task_pending (gomp_barrier_t *bar)
+{
+  bar->generation |= BAR_TASK_PENDING;
+}
+
+static inline void
+gomp_team_barrier_clear_task_pending (gomp_barrier_t *bar)
+{
+  bar->generation &= ~BAR_TASK_PENDING;
+}
+
+static inline void
+gomp_team_barrier_set_waiting_for_tasks (gomp_barrier_t *bar)
+{
+  bar->generation |= BAR_WAITING_FOR_TASK;
+}
+
+static inline bool
+gomp_team_barrier_waiting_for_tasks (gomp_barrier_t *bar)
+{
+  return (bar->generation & BAR_WAITING_FOR_TASK) != 0;
+}
+
+static inline bool
+gomp_team_barrier_cancelled (gomp_barrier_t *bar)
+{
+  return __builtin_expect ((bar->generation & BAR_CANCELLED) != 0, 0);
+}
+
+static inline void
+gomp_team_barrier_done (gomp_barrier_t *bar, gomp_barrier_state_t state)
+{
+  __atomic_store_n (&bar->generation, (state & -BAR_INCR) + BAR_INCR,
+		    MEMMODEL_RELEASE);
+}
+
+static inline bool
+gomp_barrier_state_is_incremented (gomp_barrier_state_t gen,
+				   gomp_barrier_state_t state)
+{
+  unsigned next_state = (state & -BAR_INCR) + BAR_INCR;
+  return next_state > state ? gen >= next_state : gen < state;
+}
+
+static inline bool
+gomp_barrier_has_completed (gomp_barrier_state_t state, gomp_barrier_t *bar)
+{
+  return gomp_barrier_state_is_incremented (bar->generation, state);
+}
+
+#endif /* GOMP_BARRIER_H */
++++ b/libgomp/config/mcfgthread/doacross.h
+--- /dev/null
+@@ -0,0 +1,61 @@
+/* Copyright (C) 2015-2026 Free Software Foundation, Inc.
+   Contributed by Jakub Jelinek <jakub@redhat.com>.
+
+   This file is part of the GNU Offloading and Multi Processing Library
+   (libgomp).
+
+   Libgomp is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 3, or (at your option)
+   any later version.
+
+   Libgomp is distributed in the hope that it will be useful, but WITHOUT ANY
+   WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+   FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+   more details.
+
+   Under Section 7 of GPL version 3, you are granted additional
+   permissions described in the GCC Runtime Library Exception, version
+   3.1, as published by the Free Software Foundation.
+
+   You should have received a copy of the GNU General Public License and
+   a copy of the GCC Runtime Library Exception along with this program;
+   see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
+   <http://www.gnu.org/licenses/>.  */
+
+/* This is the MCF Gthread implementation of doacross spinning.  */
+
+#ifndef GOMP_DOACROSS_H
+#define GOMP_DOACROSS_H 1
+
+#include "libgomp.h"
+#include <errno.h>
+
+#ifdef HAVE_ATTRIBUTE_VISIBILITY
+# pragma GCC visibility push(hidden)
+#endif
+
+static inline void
+cpu_relax (void)
+{
+  __asm volatile ("" : : : "memory");
+}
+
+static inline void doacross_spin (unsigned long *addr, unsigned long expected,
+				  unsigned long cur)
+{
+  do
+    {
+      cpu_relax ();
+      cur = __atomic_load_n (addr, MEMMODEL_RELAXED);
+      if (expected < cur)
+	return;
+    }
+  while (1);
+}
+
+#ifdef HAVE_ATTRIBUTE_VISIBILITY
+# pragma GCC visibility pop
+#endif
+
+#endif /* GOMP_DOACROSS_H */
++++ b/libgomp/config/mcfgthread/lock.c
+--- /dev/null
+@@ -0,0 +1,226 @@
+/* Copyright (C) 2005-2026 Free Software Foundation, Inc.
+   Contributed by Richard Henderson <rth@redhat.com>.
+
+   This file is part of the GNU Offloading and Multi Processing Library
+   (libgomp).
+
+   Libgomp is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 3, or (at your option)
+   any later version.
+
+   Libgomp is distributed in the hope that it will be useful, but WITHOUT ANY
+   WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+   FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+   more details.
+
+   Under Section 7 of GPL version 3, you are granted additional
+   permissions described in the GCC Runtime Library Exception, version
+   3.1, as published by the Free Software Foundation.
+
+   You should have received a copy of the GNU General Public License and
+   a copy of the GCC Runtime Library Exception along with this program;
+   see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
+   <http://www.gnu.org/licenses/>.  */
+
+/* This is the MCF Gthread implementation of the public OpenMP
+   locking primitives.  */
+
+#include "libgomp.h"
+
+
+void
+gomp_init_lock_30 (omp_lock_t *lock)
+{
+  _MCF_sem_init (lock, 1);
+}
+
+void
+gomp_destroy_lock_30 (omp_lock_t *lock)
+{
+  (void) lock;
+}
+
+void
+gomp_set_lock_30 (omp_lock_t *lock)
+{
+  while (_MCF_sem_wait (lock, NULL) != 0)
+    ;
+}
+
+void
+gomp_unset_lock_30 (omp_lock_t *lock)
+{
+  _MCF_sem_signal (lock);
+}
+
+int
+gomp_test_lock_30 (omp_lock_t *lock)
+{
+  int64_t timeout = 0;
+  return _MCF_sem_wait (lock, &timeout) == 0;
+}
+
+void
+gomp_init_nest_lock_30 (omp_nest_lock_t *lock)
+{
+  _MCF_sem_init (&lock->lock, 1);
+  lock->count = 0;
+  lock->owner = NULL;
+}
+
+void
+gomp_destroy_nest_lock_30 (omp_nest_lock_t *lock)
+{
+  (void) lock;
+}
+
+void
+gomp_set_nest_lock_30 (omp_nest_lock_t *lock)
+{
+  void *me = gomp_icv (true);
+
+  if (lock->owner != me)
+    {
+      while (_MCF_sem_wait (&lock->lock, NULL) != 0)
+	;
+      lock->owner = me;
+    }
+  lock->count++;
+}
+
+void
+gomp_unset_nest_lock_30 (omp_nest_lock_t *lock)
+{
+  if (--lock->count == 0)
+    {
+      lock->owner = NULL;
+      _MCF_sem_signal (&lock->lock);
+    }
+}
+
+int
+gomp_test_nest_lock_30 (omp_nest_lock_t *lock)
+{
+  void *me = gomp_icv (true);
+
+  if (lock->owner != me)
+    {
+      int64_t timeout = 0;
+      if (_MCF_sem_wait (&lock->lock, &timeout) != 0)
+	return 0;
+      lock->owner = me;
+    }
+
+  return ++lock->count;
+}
+
+#ifdef LIBGOMP_GNU_SYMBOL_VERSIONING
+void
+gomp_init_lock_25 (omp_lock_25_t *lock)
+{
+  _MCF_mutex_init (lock);
+}
+
+void
+gomp_destroy_lock_25 (omp_lock_25_t *lock)
+{
+  (void) lock;
+}
+
+void
+gomp_set_lock_25 (omp_lock_25_t *lock)
+{
+  _MCF_mutex_lock (lock, NULL);
+}
+
+void
+gomp_unset_lock_25 (omp_lock_25_t *lock)
+{
+  _MCF_mutex_unlock (lock);
+}
+
+int
+gomp_test_lock_25 (omp_lock_25_t *lock)
+{
+  int64_t timeout = 0;
+  return _MCF_mutex_lock (lock, &timeout) == 0;
+}
+
+void
+gomp_init_nest_lock_25 (omp_nest_lock_25_t *lock)
+{
+  _MCF_mutex_init (&lock->lock);
+  lock->count = 0;
+  lock->owner = NULL;
+}
+
+void
+gomp_destroy_nest_lock_25 (omp_nest_lock_25_t *lock)
+{
+  (void) lock;
+}
+
+void
+gomp_set_nest_lock_25 (omp_nest_lock_25_t *lock)
+{
+  void *me = gomp_icv (true);
+
+  if (lock->owner != me)
+    {
+      _MCF_mutex_lock (&lock->lock, NULL);
+      lock->owner = me;
+    }
+  lock->count++;
+}
+
+void
+gomp_unset_nest_lock_25 (omp_nest_lock_25_t *lock)
+{
+  if (--lock->count == 0)
+    {
+      lock->owner = NULL;
+      _MCF_mutex_unlock (&lock->lock);
+    }
+}
+
+int
+gomp_test_nest_lock_25 (omp_nest_lock_25_t *lock)
+{
+  void *me = gomp_icv (true);
+
+  if (lock->owner != me)
+    {
+      int64_t timeout = 0;
+      if (_MCF_mutex_lock (&lock->lock, &timeout) != 0)
+	return 0;
+      lock->owner = me;
+    }
+  return ++lock->count;
+}
+
+omp_lock_symver (omp_init_lock)
+omp_lock_symver (omp_destroy_lock)
+omp_lock_symver (omp_set_lock)
+omp_lock_symver (omp_unset_lock)
+omp_lock_symver (omp_test_lock)
+omp_lock_symver (omp_init_nest_lock)
+omp_lock_symver (omp_destroy_nest_lock)
+omp_lock_symver (omp_set_nest_lock)
+omp_lock_symver (omp_unset_nest_lock)
+omp_lock_symver (omp_test_nest_lock)
+
+#else
+
+ialias (omp_init_lock)
+ialias (omp_init_nest_lock)
+ialias (omp_destroy_lock)
+ialias (omp_destroy_nest_lock)
+ialias (omp_set_lock)
+ialias (omp_set_nest_lock)
+ialias (omp_unset_lock)
+ialias (omp_unset_nest_lock)
+ialias (omp_test_lock)
+ialias (omp_test_nest_lock)
+
+#endif
++++ b/libgomp/config/mcfgthread/mutex.c
+--- /dev/null
+@@ -0,0 +1,25 @@
+/* Copyright (C) 2025-2026 Free Software Foundation, Inc.
+
+   This file is part of the GNU Offloading and Multi Processing Library
+   (libgomp).
+
+   Libgomp is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 3, or (at your option)
+   any later version.
+
+   Libgomp is distributed in the hope that it will be useful, but WITHOUT ANY
+   WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+   FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+   more details.
+
+   Under Section 7 of GPL version 3, you are granted additional
+   permissions described in the GCC Runtime Library Exception, version
+   3.1, as published by the Free Software Foundation.
+
+   You should have received a copy of the GNU General Public License and
+   a copy of the GCC Runtime Library Exception along with this program;
+   see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
+   <http://www.gnu.org/licenses/>.  */
+
+#include "libgomp.h"
++++ b/libgomp/config/mcfgthread/mutex.h
+--- /dev/null
+@@ -0,0 +1,57 @@
+/* Copyright (C) 2025-2026 Free Software Foundation, Inc.
+
+   This file is part of the GNU Offloading and Multi Processing Library
+   (libgomp).
+
+   Libgomp is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 3, or (at your option)
+   any later version.
+
+   Libgomp is distributed in the hope that it will be useful, but WITHOUT ANY
+   WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+   FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+   more details.
+
+   Under Section 7 of GPL version 3, you are granted additional
+   permissions described in the GCC Runtime Library Exception, version
+   3.1, as published by the Free Software Foundation.
+
+   You should have received a copy of the GNU General Public License and
+   a copy of the GCC Runtime Library Exception along with this program;
+   see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
+   <http://www.gnu.org/licenses/>.  */
+
+/* This is the MCF Gthread implementation of a mutex synchronization
+   mechanism for libgomp.  This type is private to the library.  */
+
+#ifndef GOMP_MUTEX_H
+#define GOMP_MUTEX_H 1
+
+#include <mcfgthread/mutex.h>
+
+typedef _MCF_mutex gomp_mutex_t;
+
+#define GOMP_MUTEX_INIT_0 0
+
+static inline void gomp_mutex_init (gomp_mutex_t *mutex)
+{
+  _MCF_mutex_init (mutex);
+}
+
+static inline void gomp_mutex_lock (gomp_mutex_t *mutex)
+{
+  _MCF_mutex_lock (mutex, NULL);
+}
+
+static inline void gomp_mutex_unlock (gomp_mutex_t *mutex)
+{
+  _MCF_mutex_unlock (mutex);
+}
+
+static inline void gomp_mutex_destroy (gomp_mutex_t *mutex)
+{
+  (void) mutex;
+}
+
+#endif /* GOMP_MUTEX_H */
++++ b/libgomp/config/mcfgthread/omp-lock.h
+--- /dev/null
+@@ -0,0 +1,14 @@
+/* This header is used during the build process to find the size and
+   alignment of the public OpenMP locks, so that we can export data
+   structures without polluting the namespace.
+
+   In this MCF Gthread implementation, we use _MCF_mutex for the basic
+   lock and _MCF_sem for the OpenMP 3.0 lock.  */
+
+#include <mcfgthread/mutex.h>
+#include <mcfgthread/sem.h>
+
+typedef _MCF_mutex omp_lock_25_t;
+typedef struct { _MCF_mutex lock; int count; void *owner; } omp_nest_lock_25_t;
+typedef _MCF_sem omp_lock_t;
+typedef struct { _MCF_sem lock; int count; void *owner; } omp_nest_lock_t;
++++ b/libgomp/config/mcfgthread/plugin-suffix.h
+--- /dev/null
+@@ -0,0 +1,26 @@
+/* Copyright (C) 2015-2026 Free Software Foundation, Inc.
+   Contributed by Jack Howarth <howarth.at.gcc@gmail.com>
+
+   This file is part of the GNU Offloading and Multi Processing Library
+   (libgomp).
+
+   Libgomp is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 3, or (at your option)
+   any later version.
+
+   Libgomp is distributed in the hope that it will be useful, but WITHOUT ANY
+   WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+   FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+   more details.
+
+   Under Section 7 of GPL version 3, you are granted additional
+   permissions described in the GCC Runtime Library Exception, version
+   3.1, as published by the Free Software Foundation.
+
+   You should have received a copy of the GNU General Public License and
+   a copy of the GCC Runtime Library Exception along with this program;
+   see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
+   <http://www.gnu.org/licenses/>.  */
+
+#define SONAME_SUFFIX(n) (".dll")
++++ b/libgomp/config/mcfgthread/pool.h
+--- /dev/null
+@@ -0,0 +1,68 @@
+/* Copyright (C) 2005-2026 Free Software Foundation, Inc.
+   Contributed by Sebastian Huber <sebastian.huber@embedded-brains.de>.
+
+   This file is part of the GNU Offloading and Multi Processing Library
+   (libgomp).
+
+   Libgomp is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 3, or (at your option)
+   any later version.
+
+   Libgomp is distributed in the hope that it will be useful, but WITHOUT ANY
+   WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+   FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+   more details.
+
+   Under Section 7 of GPL version 3, you are granted additional
+   permissions described in the GCC Runtime Library Exception, version
+   3.1, as published by the Free Software Foundation.
+
+   You should have received a copy of the GNU General Public License and
+   a copy of the GCC Runtime Library Exception along with this program;
+   see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
+   <http://www.gnu.org/licenses/>.  */
+
+/* This is the MCF Gthread implementation of the thread pool management
+   for libgomp.  This type is private to the library.  */
+
+#ifndef GOMP_POOL_H
+#define GOMP_POOL_H 1
+
+#include "libgomp.h"
+#include <mcfgthread/thread.h>
+
+/* Get the thread pool, allocate and initialize it on demand.  */
+
+static inline struct gomp_thread_pool *
+gomp_get_thread_pool (struct gomp_thread *thr, unsigned nthreads)
+{
+  struct gomp_thread_pool *pool = thr->thread_pool;
+  if (__builtin_expect (pool == NULL, 0))
+    {
+      pool = gomp_malloc (sizeof (*pool));
+      pool->threads = NULL;
+      pool->threads_size = 0;
+      pool->threads_used = 0;
+      pool->last_team = NULL;
+      pool->threads_busy = nthreads;
+      thr->thread_pool = pool;
+      _MCF_tls_set (gomp_tls_destructor_key, thr);
+    }
+  return pool;
+}
+
+static inline void
+gomp_release_thread_pool (struct gomp_thread_pool *pool)
+{
+  (void) pool;
+}
+
+static inline void *
+gomp_adjust_thread_attr (void *attr, void *mutable_attr)
+{
+  (void) mutable_attr;
+  return attr;
+}
+
+#endif /* GOMP_POOL_H */
++++ b/libgomp/config/mcfgthread/proc.c
+--- /dev/null
+@@ -0,0 +1,90 @@
+/* Copyright (C) 2005-2026 Free Software Foundation, Inc.
+
+   This file is part of the GNU Offloading and Multi Processing Library
+   (libgomp).
+
+   Libgomp is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 3, or (at your option)
+   any later version.
+
+   Libgomp is distributed in the hope that it will be useful, but WITHOUT ANY
+   WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+   FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+   more details.
+
+   Under Section 7 of GPL version 3, you are granted additional
+   permissions described in the GCC Runtime Library Exception, version
+   3.1, as published by the Free Software Foundation.
+
+   You should have received a copy of the GNU General Public License and
+   a copy of the GCC Runtime Library Exception along with this program;
+   see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
+   <http://www.gnu.org/licenses/>.  */
+
+/* This file contains system specific routines related to counting
+   online processors and dynamic load balancing.  */
+
+#include "libgomp.h"
+#include <mcfgthread/fwd.h>
+#include <windows.h>
+
+
+/* At startup, determine the default number of threads.  */
+
+void
+gomp_init_num_threads (void)
+{
+  gomp_global_icv.nthreads_var = _MCF_get_processor_count ();
+}
+
+/* When OMP_DYNAMIC is set, at thread launch determine the number of
+   threads we should spawn for this team.  */
+
+unsigned
+gomp_dynamic_max_threads (void)
+{
+  unsigned n_onln;
+  unsigned nthreads_var = gomp_icv (false)->nthreads_var;
+
+  n_onln = _MCF_get_processor_count ();
+  if (n_onln > nthreads_var)
+    n_onln = nthreads_var;
+
+  /* Windows does not provide getloadavg().  Use the system load
+     information via GetSystemTimes() to approximate CPU utilization.
+     idle_frac = idle_time / total_time; busy cores ~= n_onln * (1 - idle_frac).  */
+  FILETIME idle_ft, kernel_ft, user_ft;
+  if (GetSystemTimes (&idle_ft, &kernel_ft, &user_ft))
+    {
+      ULARGE_INTEGER idle, kernel, user;
+      idle.LowPart = idle_ft.dwLowDateTime;
+      idle.HighPart = idle_ft.dwHighDateTime;
+      kernel.LowPart = kernel_ft.dwLowDateTime;
+      kernel.HighPart = kernel_ft.dwHighDateTime;
+      user.LowPart = user_ft.dwLowDateTime;
+      user.HighPart = user_ft.dwHighDateTime;
+      ULONGLONG total = kernel.QuadPart + user.QuadPart;
+      if (total > 0)
+	{
+	  unsigned busy = (unsigned) ((n_onln * (total - idle.QuadPart)
+				      + total / 2) / total);
+	  if (busy >= n_onln)
+	    busy = n_onln > 0 ? n_onln - 1 : 0;
+	  n_onln -= busy;
+	  /* Ensure at least 1 thread.  */
+	  if (n_onln < 1)
+	    n_onln = 1;
+	}
+    }
+
+  return n_onln;
+}
+
+int
+omp_get_num_procs (void)
+{
+  return _MCF_get_processor_count ();
+}
+
+ialias (omp_get_num_procs)
++++ b/libgomp/config/mcfgthread/ptrlock.c
+--- /dev/null
+@@ -0,0 +1,25 @@
+/* Copyright (C) 2025-2026 Free Software Foundation, Inc.
+
+   This file is part of the GNU Offloading and Multi Processing Library
+   (libgomp).
+
+   Libgomp is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 3, or (at your option)
+   any later version.
+
+   Libgomp is distributed in the hope that it will be useful, but WITHOUT ANY
+   WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+   FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+   more details.
+
+   Under Section 7 of GPL version 3, you are granted additional
+   permissions described in the GCC Runtime Library Exception, version
+   3.1, as published by the Free Software Foundation.
+
+   You should have received a copy of the GNU General Public License and
+   a copy of the GCC Runtime Library Exception along with this program;
+   see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
+   <http://www.gnu.org/licenses/>.  */
+
+#include "libgomp.h"
++++ b/libgomp/config/mcfgthread/ptrlock.h
+--- /dev/null
+@@ -0,0 +1,66 @@
+/* Copyright (C) 2008-2026 Free Software Foundation, Inc.
+   Contributed by Jakub Jelinek <jakub@redhat.com>.
+
+   This file is part of the GNU Offloading and Multi Processing Library
+   (libgomp).
+
+   Libgomp is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 3, or (at your option)
+   any later version.
+
+   Libgomp is distributed in the hope that it will be useful, but WITHOUT ANY
+   WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+   FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+   more details.
+
+   Under Section 7 of GPL version 3, you are granted additional
+   permissions described in the GCC Runtime Library Exception, version
+   3.1, as published by the Free Software Foundation.
+
+   You should have received a copy of the GNU General Public License and
+   a copy of the GCC Runtime Library Exception along with this program;
+   see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
+   <http://www.gnu.org/licenses/>.  */
+
+/* This is the MCF Gthread implementation of a mutex synchronization
+   mechanism for libgomp.  This type is private to the library.  */
+
+#ifndef GOMP_PTRLOCK_H
+#define GOMP_PTRLOCK_H 1
+
+typedef struct { void *ptr; gomp_mutex_t lock; } gomp_ptrlock_t;
+
+static inline void gomp_ptrlock_init (gomp_ptrlock_t *ptrlock, void *ptr)
+{
+  ptrlock->ptr = ptr;
+  gomp_mutex_init (&ptrlock->lock);
+}
+
+static inline void *gomp_ptrlock_get (gomp_ptrlock_t *ptrlock)
+{
+  if (ptrlock->ptr != NULL)
+    return ptrlock->ptr;
+
+  gomp_mutex_lock (&ptrlock->lock);
+  if (ptrlock->ptr != NULL)
+    {
+      gomp_mutex_unlock (&ptrlock->lock);
+      return ptrlock->ptr;
+    }
+
+  return NULL;
+}
+
+static inline void gomp_ptrlock_set (gomp_ptrlock_t *ptrlock, void *ptr)
+{
+  ptrlock->ptr = ptr;
+  gomp_mutex_unlock (&ptrlock->lock);
+}
+
+static inline void gomp_ptrlock_destroy (gomp_ptrlock_t *ptrlock)
+{
+  gomp_mutex_destroy (&ptrlock->lock);
+}
+
+#endif /* GOMP_PTRLOCK_H */
++++ b/libgomp/config/mcfgthread/sem.c
+--- /dev/null
+@@ -0,0 +1,32 @@
+/* Copyright (C) 2025-2026 Free Software Foundation, Inc.
+
+   This file is part of the GNU Offloading and Multi Processing Library
+   (libgomp).
+
+   Libgomp is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 3, or (at your option)
+   any later version.
+
+   Libgomp is distributed in the hope that it will be useful, but WITHOUT ANY
+   WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+   FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+   more details.
+
+   Under Section 7 of GPL version 3, you are granted additional
+   permissions described in the GCC Runtime Library Exception, version
+   3.1, as published by the Free Software Foundation.
+
+   You should have received a copy of the GNU General Public License and
+   a copy of the GCC Runtime Library Exception along with this program;
+   see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
+   <http://www.gnu.org/licenses/>.  */
+
+#include "libgomp.h"
+
+void
+gomp_sem_wait (gomp_sem_t *sem)
+{
+  while (_MCF_sem_wait (sem, NULL) != 0)
+    continue;
+}
++++ b/libgomp/config/mcfgthread/sem.h
+--- /dev/null
+@@ -0,0 +1,65 @@
+/* Copyright (C) 2025-2026 Free Software Foundation, Inc.
+
+   This file is part of the GNU Offloading and Multi Processing Library
+   (libgomp).
+
+   Libgomp is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 3, or (at your option)
+   any later version.
+
+   Libgomp is distributed in the hope that it will be useful, but WITHOUT ANY
+   WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+   FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+   more details.
+
+   Under Section 7 of GPL version 3, you are granted additional
+   permissions described in the GCC Runtime Library Exception, version
+   3.1, as published by the Free Software Foundation.
+
+   You should have received a copy of the GNU General Public License and
+   a copy of the GCC Runtime Library Exception along with this program;
+   see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
+   <http://www.gnu.org/licenses/>.  */
+
+/* This is the MCF Gthread implementation of a semaphore synchronization
+   mechanism for libgomp.  This type is private to the library.  */
+
+#ifndef GOMP_SEM_H
+#define GOMP_SEM_H 1
+
+#ifdef HAVE_ATTRIBUTE_VISIBILITY
+# pragma GCC visibility push(default)
+#endif
+
+#include <mcfgthread/sem.h>
+
+#ifdef HAVE_ATTRIBUTE_VISIBILITY
+# pragma GCC visibility pop
+#endif
+
+typedef _MCF_sem gomp_sem_t;
+
+static inline void gomp_sem_init (gomp_sem_t *sem, int value)
+{
+  _MCF_sem_init (sem, (intptr_t) value);
+}
+
+extern void gomp_sem_wait (gomp_sem_t *sem);
+
+static inline void gomp_sem_post (gomp_sem_t *sem)
+{
+  _MCF_sem_signal (sem);
+}
+
+static inline void gomp_sem_destroy (gomp_sem_t *sem)
+{
+  (void) sem;
+}
+
+static inline int gomp_sem_getcount (gomp_sem_t *sem)
+{
+  return (int) _MCF_sem_get (sem);
+}
+
+#endif /* GOMP_SEM_H */
++++ b/libgomp/config/mcfgthread/simple-bar.h
+--- /dev/null
+@@ -0,0 +1,69 @@
+/* Copyright (C) 2015-2026 Free Software Foundation, Inc.
+   Contributed by Alexander Monakov <amonakov@ispras.ru>
+
+   This file is part of the GNU Offloading and Multi Processing Library
+   (libgomp).
+
+   Libgomp is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 3, or (at your option)
+   any later version.
+
+   Libgomp is distributed in the hope that it will be useful, but WITHOUT ANY
+   WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+   FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+   more details.
+
+   Under Section 7 of GPL version 3, you are granted additional
+   permissions described in the GCC Runtime Library Exception, version
+   3.1, as published by the Free Software Foundation.
+
+   You should have received a copy of the GNU General Public License and
+   a copy of the GCC Runtime Library Exception along with this program;
+   see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
+   <http://www.gnu.org/licenses/>.  */
+
+/* This is a simplified barrier that is suitable for thread pool
+   synchronization.  Only a subset of full barrier API (bar.h) is exposed.  */
+
+#ifndef GOMP_SIMPLE_BARRIER_H
+#define GOMP_SIMPLE_BARRIER_H 1
+
+#include "bar.h"
+
+typedef struct
+{
+  gomp_barrier_t bar;
+} gomp_simple_barrier_t;
+
+static inline void
+gomp_simple_barrier_init (gomp_simple_barrier_t *bar, unsigned count)
+{
+  gomp_barrier_init (&bar->bar, count);
+}
+
+static inline void
+gomp_simple_barrier_reinit (gomp_simple_barrier_t *bar, unsigned count)
+{
+  gomp_barrier_reinit (&bar->bar, count);
+}
+
+static inline void
+gomp_simple_barrier_destroy (gomp_simple_barrier_t *bar)
+{
+  gomp_barrier_destroy (&bar->bar);
+}
+
+static inline void
+gomp_simple_barrier_wait (gomp_simple_barrier_t *bar)
+{
+  gomp_barrier_wait (&bar->bar);
+}
+
+static inline void
+gomp_simple_barrier_wait_last (gomp_simple_barrier_t *bar)
+{
+  gomp_barrier_wait_last (&bar->bar);
+}
+
+#endif /* GOMP_SIMPLE_BARRIER_H */
++++ b/libgomp/config/mcfgthread/thread-stacksize.h
+--- /dev/null
+@@ -0,0 +1,27 @@
+/* Copyright (C) 2017-2026 Free Software Foundation, Inc.
+   Contributed by Jakub Jelinek <jakub@redhat.com>
+
+   This file is part of the GNU Offloading and Multi Processing Library
+   (libgomp).
+
+   Libgomp is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 3, or (at your option)
+   any later version.
+
+   Libgomp is distributed in the hope that it will be useful, but WITHOUT ANY
+   WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+   FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+   more details.
+
+   Under Section 7 of GPL version 3, you are granted additional
+   permissions described in the GCC Runtime Library Exception, version
+   3.1, as published by the Free Software Foundation.
+
+   You should have received a copy of the GNU General Public License and
+   a copy of the GCC Runtime Library Exception along with this program;
+   see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
+   <http://www.gnu.org/licenses/>.  */
+
+/* 0 means use the system default.  */
+#define GOMP_DEFAULT_STACKSIZE	0
++++ b/libgomp/config/mcfgthread/time.c
+--- /dev/null
+@@ -0,0 +1,52 @@
+/* Copyright (C) 2005-2026 Free Software Foundation, Inc.
+
+   This file is part of the GNU Offloading and Multi Processing Library
+   (libgomp).
+
+   Libgomp is free software; you can redistribute it and/or modify it
+   under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 3, or (at your option)
+   any later version.
+
+   Libgomp is distributed in the hope that it will be useful, but WITHOUT ANY
+   WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+   FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+   more details.
+
+   Under Section 7 of GPL version 3, you are granted additional
+   permissions described in the GCC Runtime Library Exception, version
+   3.1, as published by the Free Software Foundation.
+
+   You should have received a copy of the GNU General Public License and
+   a copy of the GCC Runtime Library Exception along with this program;
+   see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
+   <http://www.gnu.org/licenses/>.  */
+
+/* This file contains system specific timer routines.  */
+
+#include "libgomp.h"
+#include <mcfgthread/clock.h>
+#include <windows.h>
+
+
+double
+omp_get_wtime (void)
+{
+  /* _MCF_hires_steady_now returns milliseconds as a double.  */
+  return _MCF_hires_steady_now () / 1000.0;
+}
+
+double
+omp_get_wtick (void)
+{
+  /* MCF Gthread uses Windows QueryPerformanceCounter internally.
+     Query the actual frequency to compute the true tick resolution.  */
+  LARGE_INTEGER freq;
+  if (QueryPerformanceFrequency (&freq) && freq.QuadPart > 0)
+    return 1.0 / (double) freq.QuadPart;
+  /* Fallback: 100 ns (typical Windows timer resolution).  */
+  return 1e-7;
+}
+
+ialias (omp_get_wtime)
+ialias (omp_get_wtick)
